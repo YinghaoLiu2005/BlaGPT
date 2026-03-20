@@ -27,6 +27,9 @@ from modules.pattention import Pattention
 from norms import DyTNorm, LayerNorm, RMSNorm
 from torch.nn import functional as F
 
+from mamba_ssm import Mamba2
+from mamba_ssm.modules.mamba2_sliding import Mamba2Sliding
+
 #
 # Model Configs
 #
@@ -59,7 +62,7 @@ class GPTConfig(Coqpit):
 
     # Transformer parameters
     norm_layer: str = "rmsnorm"  # type of normalization layer to use
-    attention: str = "regular"  # attention type in `get_attention()`
+    attention: str = "mamba2_sliding"  # attention type in `get_attention()`
     activation: str = "polynorm"  # activation type in `get_mlp()`
     polycom_order: int = 3  # order of polynomial for PolyCom activations (polyrelu/polynorm)
     use_soft_logit_capping: bool = False
@@ -119,6 +122,25 @@ class GPTConfig(Coqpit):
     kda_chunk_size: int = 64  # Chunk size for KDA chunkwise computation
     kda_use_short_conv: bool = True  # Whether to use short convolutions in KDA
     kda_decay_rank: int = None  # Rank for low-rank decay projection (defaults to head_dim)
+
+    # Mamba-2 parameters
+    mamba_d_state: int = 128
+    mamba_d_conv: int = 4
+    mamba_expand: int = 2
+    mamba_d_ssm: int = None
+    mamba_ngroups: int = 1
+    mamba_headdim: int = None
+    mamba_D_has_hdim: bool = False
+    mamba_norm_before_gate: bool = False
+    mamba_dt_min: float = 0.001
+    mamba_dt_max: float = 0.1
+    mamba_dt_init_floor: float = 1e-4
+    mamba_dt_limit: tuple[float, float] = (0.0, float("inf"))
+    mamba_conv_bias: bool = True
+    mamba_chunk_size: int = 256
+    mamba_use_mem_eff_path: bool = True
+    mamba_window_size: int = None
+    mamba_num_kv_heads: int = None
 
     # KDA interleaving parameters (like Kimi-Linear's 3:1 KDA-to-full-attention ratio)
     use_kda_interleaving: bool = False  # Enable KDA/full attention interleaving
@@ -305,6 +327,10 @@ def get_attention(config, depth=None):
         return GatedAttention(config)
     elif attn_type == "DiffAttnv2":
         return MultiheadDiffAttnv2(config)
+    elif attn_type == "mamba2":
+        return Mamba2Wrapper(config, depth)
+    elif attn_type == "mamba2_sliding":
+        return Mamba2SlidingWrapper(config, depth)
     raise ValueError(f"Unrecognized attention type {attn_type}")
 
 
@@ -357,6 +383,72 @@ class MultiTokenPredictionHead(nn.Module):
     def forward(self, x):
         x = self.norm(x)
         return self.head(x)
+
+
+class Mamba2Wrapper(nn.Module):
+    def __init__(self, config, depth=None):
+        super().__init__()
+        if Mamba2 is None:
+            raise ImportError("Mamba2 is unavailable. Ensure mamba_ssm is importable in this environment.")
+        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
+        self.mamba = Mamba2(
+            d_model=config.n_embd,
+            d_state=config.mamba_d_state,
+            d_conv=config.mamba_d_conv,
+            expand=config.mamba_expand,
+            headdim=headdim,
+            d_ssm=config.mamba_d_ssm,
+            ngroups=config.mamba_ngroups,
+            D_has_hdim=config.mamba_D_has_hdim,
+            rmsnorm=(config.norm_layer == "rmsnorm"),
+            norm_before_gate=config.mamba_norm_before_gate,
+            dt_min=config.mamba_dt_min,
+            dt_max=config.mamba_dt_max,
+            dt_init_floor=config.mamba_dt_init_floor,
+            dt_limit=config.mamba_dt_limit,
+            bias=config.bias,
+            conv_bias=config.mamba_conv_bias,
+            chunk_size=config.mamba_chunk_size,
+            use_mem_eff_path=config.mamba_use_mem_eff_path,
+            layer_idx=depth,
+        )
+
+    def forward(self, x, **kwargs):
+        return self.mamba(x, **kwargs)
+
+
+class Mamba2SlidingWrapper(nn.Module):
+    def __init__(self, config, depth=None):
+        super().__init__()
+        if Mamba2Sliding is None:
+            raise ImportError("Mamba2Sliding is unavailable. Ensure mamba_ssm is importable in this environment.")
+        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
+        self.mamba = Mamba2Sliding(
+            d_model=config.n_embd,
+            d_state=config.mamba_d_state,
+            d_conv=config.mamba_d_conv,
+            expand=config.mamba_expand,
+            headdim=headdim,
+            d_ssm=config.mamba_d_ssm,
+            ngroups=config.mamba_ngroups,
+            D_has_hdim=config.mamba_D_has_hdim,
+            rmsnorm=(config.norm_layer == "rmsnorm"),
+            norm_before_gate=config.mamba_norm_before_gate,
+            dt_min=config.mamba_dt_min,
+            dt_max=config.mamba_dt_max,
+            dt_init_floor=config.mamba_dt_init_floor,
+            dt_limit=config.mamba_dt_limit,
+            bias=config.bias,
+            conv_bias=config.mamba_conv_bias,
+            chunk_size=config.mamba_chunk_size,
+            use_mem_eff_path=False,
+            layer_idx=depth,
+            window_size=config.mamba_window_size,
+            num_kv_heads=config.mamba_num_kv_heads,
+        )
+
+    def forward(self, x, **kwargs):
+        return self.mamba(x, **kwargs)
 
 
 #

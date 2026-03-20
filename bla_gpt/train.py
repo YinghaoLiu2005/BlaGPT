@@ -81,6 +81,10 @@ def _load_data_shard(filename):
     return tokens
 
 
+def _format_token_count(ntok):
+    return f"{ntok:,} tokens ({ntok / 1e9:.2f}B)"
+
+
 class DistributedDataLoader:
     def __init__(self, filename_pattern, B, T, process_rank, num_processes):
         self.process_rank = process_rank
@@ -138,16 +142,16 @@ class Hyperparameters(Coqpit):
     run_name: str = "nano_gpt+rms_norm+geglu+gqa+softcap"
     compile_model: bool = True
     # data hyperparams
-    input_bin: str = "../data/fineweb10B/fineweb_train_*.bin"  # input .bin to train on
+    input_bin: str = "data/fineweb10B/fineweb_train_*.bin"  # input .bin to train on
     input_val_bin: str = (
-        "../data/fineweb10B/fineweb_val_*.bin"  # input .bin to eval validation loss on
+        "data/fineweb10B/fineweb_val_*.bin"  # input .bin to eval validation loss on
     )
 
     # training
-    batch_size: int = 8 * 64  # batch size, in sequences, across all devices
-    device_batch_size: int = 32  # batch size, in sequences, per device, grad_accum_steps = batch_size // num_devices /// device_batch_size
+    batch_size: int = 2 * 64  # batch size, in sequences, across all devices
+    device_batch_size: int = 8  # batch size, in sequences, per device, grad_accum_steps = batch_size // num_devices /// device_batch_size
     sequence_length: int = 1024  # sequence length, in tokens
-    num_iterations: int = 5100  # number of iterations to run
+    num_iterations: int = 25500  # number of iterations to run
 
     # optimizer
     optimizer_name: str = "Adam"
@@ -232,13 +236,21 @@ if __name__ == "__main__":
     val_loader = DistributedDataLoader(
         args.input_val_bin, B, T, ddp_rank, ddp_world_size
     )
+    dataset_summary_lines = []
     if master_process:
-        print(
-            f"Training DataLoader: total number of tokens: {train_loader.ntok_total} across {len(train_loader.files)} files"
+        tokens_per_train_step = args.batch_size * args.sequence_length
+        total_train_tokens = (
+            args.num_iterations * args.batch_size * args.sequence_length
         )
-        print(
-            f"Validation DataLoader: total number of tokens: {val_loader.ntok_total} across {len(val_loader.files)} files"
-        )
+        dataset_epochs = total_train_tokens / train_loader.ntok_total
+        dataset_summary_lines = [
+            f"Training dataset size: {_format_token_count(train_loader.ntok_total)} across {len(train_loader.files)} files",
+            f"Validation dataset size: {_format_token_count(val_loader.ntok_total)} across {len(val_loader.files)} files",
+            f"Tokens per training step: {_format_token_count(tokens_per_train_step)}",
+            f"Tokens actually used by this run: {_format_token_count(total_train_tokens)} over {args.num_iterations} steps ({dataset_epochs:.2f} dataset passes)",
+        ]
+        for line in dataset_summary_lines:
+            print(line)
     x, y = train_loader.next_batch()
 
     # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
@@ -334,6 +346,9 @@ if __name__ == "__main__":
             text=True,
         )
         print(f"{result.stdout}")
+        print("=" * 100)
+        for line in dataset_summary_lines:
+            print(line)
         print("=" * 100)
 
     training_time_ms = 0
@@ -499,6 +514,10 @@ if __name__ == "__main__":
                 )
 
     if master_process:
+        print("=" * 100)
+        print("Final dataset summary:")
+        for line in dataset_summary_lines:
+            print(line)
         print(
             f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB"
         )
