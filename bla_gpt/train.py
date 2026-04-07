@@ -148,7 +148,7 @@ class Hyperparameters(Coqpit):
     )
 
     # training
-    batch_size: int = 2 * 64  # batch size, in sequences, across all devices
+    batch_size: int = 128  # batch size, in sequences, across all devices
     device_batch_size: int = 8  # batch size, in sequences, per device, grad_accum_steps = batch_size // num_devices /// device_batch_size
     sequence_length: int = 1024  # sequence length, in tokens
     num_iterations: int = 25500  # number of iterations to run
@@ -191,6 +191,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--model_name", type=str, default="bla_gpt")
+    parser.add_argument("--resume",type=str, default=None, help="path to checkpoint to resume from")
     cli_args = parser.parse_args()
 
     args = Hyperparameters()
@@ -280,7 +281,7 @@ if __name__ == "__main__":
     model = DDP(
         model,
         device_ids=[ddp_local_rank],
-        find_unused_parameters=True,
+        find_unused_parameters=False,
         broadcast_buffers=False,
         gradient_as_bucket_view=True,
     )
@@ -352,13 +353,44 @@ if __name__ == "__main__":
         print("=" * 100)
 
     training_time_ms = 0
+    start_step = 0
     best_val_loss = float("inf")
+
+    # ===== resume =====
+    if cli_args.resume is not None:
+        ckpt = torch.load(cli_args.resume, map_location="cpu")
+        raw_model.load_state_dict(ckpt["model"], strict=True)
+        if "optimizers" in ckpt:
+            for opt, st in zip(optimizers, ckpt["optimizers"]):
+                opt.load_state_dict(st)
+        start_step = int(ckpt.get("step", 0)) + 1
+        if "val_loss" in ckpt:
+            best_val_loss = float(ckpt["val_loss"])
+        if "schedulers" in ckpt:
+            for sched, st in zip(schedulers, ckpt["schedulers"]):
+                sched.load_state_dict(st)
+        elif start_step > 0:
+            resumed_lr = get_lr(start_step)
+            for opt in optimizers:
+                for group in opt.param_groups:
+                    group["lr"] = args.learning_rate * resumed_lr
+            for sched in schedulers:
+                sched.last_epoch = start_step - 1
+                if hasattr(sched, "_step_count"):
+                    sched._step_count = start_step
+                if hasattr(sched, "_last_lr"):
+                    sched._last_lr = [group["lr"] for group in sched.optimizer.param_groups]
+        del ckpt
+        torch.cuda.empty_cache()
+        if master_process:
+            print(f"Resumed from {cli_args.resume}, start_step={start_step}")
+
     # start the clock
     torch.cuda.synchronize()
     t0 = time.time()
     # begin training
     train_loader.reset()
-    for step in range(args.num_iterations + 1):
+    for step in range(start_step, args.num_iterations + 1):
         last_step = step == args.num_iterations
         # This effectively ignores timing first 10 steps, which are slower for weird reasons.
         # Alternately, and slightly more correctly in terms of benchmarking, we could do 10
@@ -421,6 +453,7 @@ if __name__ == "__main__":
                     train_config=args.to_dict(),
                     model=raw_model.state_dict(),
                     optimizers=[opt.state_dict() for opt in optimizers],
+                    schedulers=[sched.state_dict() for sched in schedulers],
                     val_loss=val_loss,
                 )
                 best_model_path = f"logs/{run_id}/best_model_{step}.pt"
@@ -445,6 +478,7 @@ if __name__ == "__main__":
                 train_config=args.to_dict(),
                 model=raw_model.state_dict(),
                 optimizers=[opt.state_dict() for opt in optimizers],
+                schedulers=[sched.state_dict() for sched in schedulers],
             )
             torch.save(log, "logs/%s/state_step%06d.pt" % (run_id, step))
 

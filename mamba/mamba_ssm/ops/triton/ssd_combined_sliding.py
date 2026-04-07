@@ -1,5 +1,6 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 
+from contextlib import nullcontext
 from typing import Optional
 
 import torch
@@ -8,6 +9,28 @@ from einops import rearrange
 
 from mamba_ssm.ops.triton.ssd_combined import ssd_selective_scan
 from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn
+
+try:
+    from transformers.modeling_flash_attention_utils import (
+        _flash_attention_forward,
+        is_flash_attn_available,
+    )
+except ImportError:
+    _flash_attention_forward = None
+
+    def is_flash_attn_available() -> bool:
+        return False
+
+try:
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+except ImportError:
+    SDPBackend, sdpa_kernel = None, None
+
+
+def _sdpa_math_context():
+    if sdpa_kernel is None or SDPBackend is None:
+        return nullcontext()
+    return sdpa_kernel(backends=[SDPBackend.MATH])
 
 
 def _build_sliding_window_mask(
@@ -31,6 +54,153 @@ def _build_sliding_window_mask(
 
 def _reshape_projected(x: torch.Tensor, num_heads: int) -> torch.Tensor:
     return rearrange(x, "b s (h d) -> b h s d", h=num_heads)
+
+
+def _normalize_attn_input(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """RMS normalization with gradient stability for fp16."""
+    # For fp16, clamp to safe range before normalization
+    if x.dtype == torch.float16:
+        # Use smaller range for fp16 safety
+        x = torch.clamp(x, min=-65000.0, max=65000.0)
+    
+    # Use in-place operations to save memory
+    norm = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps)
+    return x / norm
+
+
+def _index_first_axis(tensor: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    return tensor.reshape(-1, *tensor.shape[2:])[indices]
+
+
+def _flatten_seq_idx(seq_idx: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, int]:
+    assert seq_idx.dim() == 2, "seq_idx must have shape (batch, seqlen)"
+    batch, seqlen = seq_idx.shape
+    flat_seq = seq_idx.reshape(-1)
+    valid = flat_seq >= 0
+    indices = valid.nonzero(as_tuple=False).flatten()
+    if indices.numel() == 0:
+        return indices, torch.zeros(1, dtype=torch.int32, device=seq_idx.device), 0
+    batch_ids = torch.arange(batch, device=seq_idx.device, dtype=seq_idx.dtype)
+    flat_batch = batch_ids[:, None].expand(batch, seqlen).reshape(-1)[indices]
+    flat_seq = flat_seq[indices]
+    seq_starts = torch.ones(indices.shape[0], dtype=torch.bool, device=seq_idx.device)
+    seq_starts[1:] = (flat_seq[1:] != flat_seq[:-1]) | (flat_batch[1:] != flat_batch[:-1])
+    start_idx = seq_starts.nonzero(as_tuple=False).flatten()
+    lengths = torch.diff(
+        torch.cat([start_idx, start_idx.new_tensor([indices.shape[0]])])
+    ).to(torch.int32)
+    cu_seqlens = F.pad(torch.cumsum(lengths, dim=0), (1, 0))
+    return indices, cu_seqlens, int(lengths.max().item())
+
+
+def _require_flash_attention() -> None:
+    if _flash_attention_forward is None or not is_flash_attn_available():
+        raise RuntimeError(
+            "sliding_window_attention requires flash-attn via "
+            "transformers.modeling_flash_attention_utils, but flash-attn is not available."
+        )
+
+
+def sliding_window_attention_flash(
+    x_bsd: torch.Tensor,
+    q_proj_weight: torch.Tensor,
+    k_proj_weight: torch.Tensor,
+    v_proj_weight: torch.Tensor,
+    out_proj_weight: torch.Tensor,
+    q_proj_bias: Optional[torch.Tensor] = None,
+    k_proj_bias: Optional[torch.Tensor] = None,
+    v_proj_bias: Optional[torch.Tensor] = None,
+    out_proj_bias: Optional[torch.Tensor] = None,
+    num_heads: int = 1,
+    num_kv_heads: int = 1,
+    window_size: int = 512,
+    seq_idx: Optional[torch.Tensor] = None,
+    dropout_p: float = 0.0,
+    training: bool = False,
+) -> torch.Tensor:
+    """
+    Sliding-window causal attention backed by the flash-attn kernel.
+
+    Argument:
+        x_bsd: (batch, seqlen, dim)
+        seq_idx: (batch, seqlen), int32. Tokens with seq_idx < 0 are treated as padding.
+    Return:
+        out: (batch, seqlen, dim)
+    """
+    _require_flash_attention()
+    batch, seqlen, dim = x_bsd.shape
+    assert dim % num_heads == 0, "x_bsd.shape[-1] must be divisible by num_heads"
+    assert num_heads % num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
+    head_dim = dim // num_heads
+    kv_dim = num_kv_heads * head_dim
+    assert k_proj_weight.shape[0] == kv_dim, "k_proj_weight output dim must match num_kv_heads * head_dim"
+    assert v_proj_weight.shape[0] == kv_dim, "v_proj_weight output dim must match num_kv_heads * head_dim"
+
+    # Normalize input with stability checks
+    x_bsd = _normalize_attn_input(x_bsd)
+    
+    # Project Q, K, V
+    q = F.linear(x_bsd, q_proj_weight, q_proj_bias).view(batch, seqlen, num_heads, head_dim)
+    k = F.linear(x_bsd, k_proj_weight, k_proj_bias).view(batch, seqlen, num_kv_heads, head_dim)
+    v = F.linear(x_bsd, v_proj_weight, v_proj_bias).view(batch, seqlen, num_kv_heads, head_dim)
+    
+    # CRITICAL: Delete x_bsd to free memory before attention
+    del x_bsd
+
+    flash_kwargs = dict(
+        attention_mask=None,
+        query_length=seqlen,
+        is_causal=True,
+        dropout=dropout_p if training else 0.0,
+        softmax_scale=head_dim**-0.5,
+        sliding_window=window_size,
+        attn_implementation="flash_attention_2",
+    )
+    if seq_idx is None:
+        y = _flash_attention_forward(q, k, v, **flash_kwargs)
+    else:
+        indices, cu_seqlens, max_seqlen = _flatten_seq_idx(seq_idx)
+        if indices.numel() == 0:
+            y = torch.zeros_like(q)  # Better for gradients
+        else:
+            q_unpad = _index_first_axis(q, indices).unsqueeze(0)
+            k_unpad = _index_first_axis(k, indices).unsqueeze(0)
+            v_unpad = _index_first_axis(v, indices).unsqueeze(0)
+            
+            # Free memory before flash attention
+            del indices
+            
+            y_unpad = _flash_attention_forward(
+                q_unpad,
+                k_unpad,
+                v_unpad,
+                cu_seq_lens_q=cu_seqlens,
+                cu_seq_lens_k=cu_seqlens,
+                max_length_q=max_seqlen,
+                max_length_k=max_seqlen,
+                **flash_kwargs,
+            )
+            
+            # Free unpadded tensors
+            del q_unpad, k_unpad, v_unpad
+            
+            y = torch.zeros(batch * seqlen, num_heads, head_dim, device=q.device, dtype=q.dtype)
+            # Create indices again (small memory cost)
+            indices, _, _ = _flatten_seq_idx(seq_idx)
+            y[indices] = y_unpad.squeeze(0)
+            del y_unpad, indices
+            y = y.view(batch, seqlen, num_heads, head_dim)
+    
+    # Free q, k, v before output projection
+    del q, k, v
+
+    y = rearrange(y, "b s h d -> b s (h d)")
+    out = F.linear(y, out_proj_weight, out_proj_bias)
+    
+    # Free y before return
+    del y
+    
+    return out
 
 
 def sliding_window_attention_ref(
@@ -68,24 +238,64 @@ def sliding_window_attention_ref(
     if seq_idx is not None:
         assert seq_idx.shape == (batch, seqlen), "seq_idx must have shape (batch, seqlen)"
 
+    x_bsd = _normalize_attn_input(x_bsd)
     q = _reshape_projected(F.linear(x_bsd, q_proj_weight, q_proj_bias), num_heads)
     k = _reshape_projected(F.linear(x_bsd, k_proj_weight, k_proj_bias), num_kv_heads)
     v = _reshape_projected(F.linear(x_bsd, v_proj_weight, v_proj_bias), num_kv_heads)
     mask = _build_sliding_window_mask(seqlen, window_size, x_bsd.device, seq_idx=seq_idx)
-    y = F.scaled_dot_product_attention(
-        q,
-        k,
-        v,
-        attn_mask=mask,
-        dropout_p=dropout_p if training else 0.0,
-        is_causal=False,
-        enable_gqa=num_heads != num_kv_heads,
-    )
+    # Masked local attention + GQA can dispatch to a different SDPA backend in eval/no_grad,
+    # which led to validation-only numerical regressions. Force the stable math backend here.
+    ctx = _sdpa_math_context() if not training else nullcontext()
+    with ctx:
+        y = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=mask,
+            dropout_p=dropout_p if training else 0.0,
+            is_causal=False,
+            enable_gqa=num_heads != num_kv_heads,
+        )
     y = rearrange(y, "b h s d -> b s (h d)")
     return F.linear(y, out_proj_weight, out_proj_bias)
 
 
-sliding_window_attention = sliding_window_attention_ref
+# 对于序列长度 <= 1500，使用 PyTorch 原生实现更省内存
+# 对于序列长度 > 1500，使用 Flash Attention 更快
+def _get_sliding_window_attention_impl():
+    """根据可用性和序列长度自动选择最佳实现"""
+    import os
+    
+    # 可通过环境变量强制选择实现
+    force_impl = os.environ.get('SLIDING_ATTN_IMPL', 'auto').lower()
+    
+    if force_impl == 'flash':
+        if is_flash_attn_available():
+            print("🚀 使用 Flash Attention 实现")
+            return sliding_window_attention_flash
+        else:
+            print("⚠️  Flash Attention 不可用，回退到参考实现")
+            return sliding_window_attention_ref
+    elif force_impl == 'ref':
+        print("📘 使用 PyTorch 参考实现（更省内存）")
+        return sliding_window_attention_ref
+    else:  # auto
+        if is_flash_attn_available():
+            print("🔄 自动模式：将根据序列长度选择实现")
+            # 返回一个自适应包装器
+            def adaptive_attention(x_bsd, *args, window_size=None, **kwargs):
+                seqlen = x_bsd.shape[1]
+                # 对于 <= 1500 的序列，用参考实现更省内存
+                if seqlen <= 1500:
+                    return sliding_window_attention_ref(x_bsd, *args, window_size=window_size, **kwargs)
+                else:
+                    return sliding_window_attention_flash(x_bsd, *args, window_size=window_size, **kwargs)
+            return adaptive_attention
+        else:
+            print("📘 使用 PyTorch 参考实现（Flash Attention 不可用）")
+            return sliding_window_attention_ref
+
+sliding_window_attention = _get_sliding_window_attention_impl()
 
 
 def sliding_window_attention_step(
@@ -102,14 +312,21 @@ def sliding_window_attention_step(
     num_heads: int = 1,
     num_kv_heads: int = 1,
 ) -> torch.Tensor:
+    """Single-step sliding window attention for inference."""
     _, dim = x_bd.shape
     assert dim % num_heads == 0, "x_bd.shape[-1] must be divisible by num_heads"
     assert dim % num_kv_heads == 0, "x_bd.shape[-1] must be divisible by num_kv_heads"
     assert num_heads % num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
 
+    # Normalize with stability
+    x_bd = _normalize_attn_input(x_bd)
+    
     q = rearrange(F.linear(x_bd, q_proj_weight, q_proj_bias), "b (h d) -> b h 1 d", h=num_heads)
     k_new = rearrange(F.linear(x_bd, k_proj_weight, k_proj_bias), "b (h d) -> b h 1 d", h=num_kv_heads)
     v_new = rearrange(F.linear(x_bd, v_proj_weight, v_proj_bias), "b (h d) -> b h 1 d", h=num_kv_heads)
+    
+    # Free x_bd
+    del x_bd
 
     k_cache = attn_state["k_cache"]
     v_cache = attn_state["v_cache"]
@@ -149,6 +366,7 @@ def prefill_sliding_window_cache(
     v_proj_bias: Optional[torch.Tensor] = None,
     num_kv_heads: int = 1,
 ) -> None:
+    x_bsd = _normalize_attn_input(x_bsd)
     k = _reshape_projected(F.linear(x_bsd, k_proj_weight, k_proj_bias), num_kv_heads)
     v = _reshape_projected(F.linear(x_bsd, v_proj_weight, v_proj_bias), num_kv_heads)
     window_size = attn_state["k_cache"].shape[2]

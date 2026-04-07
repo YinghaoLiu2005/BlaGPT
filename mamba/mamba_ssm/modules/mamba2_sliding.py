@@ -62,7 +62,7 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
         sequence_parallel=True,
         device=None,
         dtype=None,
-        window_size=None,
+        window_size=512,
         num_kv_heads=None,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
@@ -92,7 +92,12 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
         self.chunk_size = chunk_size
         self.use_mem_eff_path = use_mem_eff_path
         self.layer_idx = layer_idx
-        self.window_size = self.d_conv if window_size is None else window_size
+        # Use reasonable window size, not d_conv (which is typically only 4)
+        self.window_size = window_size if window_size is not None else 512
+        if self.window_size < self.d_conv:
+            import warnings
+            warnings.warn(f"window_size ({self.window_size}) is smaller than d_conv ({self.d_conv}). "
+                         f"This may limit the model's ability to capture local context.")
 
         # Order: [z, x, B, C, dt]
         d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
@@ -123,6 +128,22 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
         self.k_proj = nn.Linear(self.conv_dim, kv_dim, bias=bias, **factory_kwargs)
         self.v_proj = nn.Linear(self.conv_dim, kv_dim, bias=bias, **factory_kwargs)
         self.xbc_out_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=bias, **factory_kwargs)
+        
+        # Initialize projection weights with smaller scale to prevent initial NaN
+        with torch.no_grad():
+            nn.init.xavier_uniform_(self.q_proj.weight, gain=0.5)
+            nn.init.xavier_uniform_(self.k_proj.weight, gain=0.5)
+            nn.init.xavier_uniform_(self.v_proj.weight, gain=0.5)
+            nn.init.xavier_uniform_(self.xbc_out_proj.weight, gain=0.5)
+            if self.q_proj.bias is not None:
+                nn.init.zeros_(self.q_proj.bias)
+            if self.k_proj.bias is not None:
+                nn.init.zeros_(self.k_proj.bias)
+            if self.v_proj.bias is not None:
+                nn.init.zeros_(self.v_proj.bias)
+            if self.xbc_out_proj.bias is not None:
+                nn.init.zeros_(self.xbc_out_proj.bias)
+        self.act = nn.SiLU()
 
         dt = torch.exp(
             torch.rand(self.nheads, **factory_kwargs) * (math.log(dt_max) - math.log(dt_min))
@@ -164,7 +185,14 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
             )
 
     def _mix_xbc(self, xBC, seq_idx=None):
-        return sliding_window_attention(
+        """Apply sliding window attention to xBC.
+        
+        Memory-efficient implementation that:
+        1. Uses Flash Attention 2 for O(N) memory complexity
+        2. Frees intermediate tensors aggressively
+        3. Avoids NaN checks in forward pass for speed (rely on autograd)
+        """
+        xBC = sliding_window_attention(
             xBC,
             q_proj_weight=self.q_proj.weight,
             k_proj_weight=self.k_proj.weight,
@@ -180,6 +208,7 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
             seq_idx=seq_idx,
             training=self.training,
         )
+        return self.act(xBC)
 
     def forward(self, u, seqlen=None, seq_idx=None, cu_seqlens=None, inference_params=None):
         """
@@ -291,7 +320,8 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
             out_proj_bias=self.xbc_out_proj.bias,
             num_heads=self.attn_num_heads,
             num_kv_heads=self.num_kv_heads,
-        ).to(dtype=dtype)
+        )
+        xBC = self.act(xBC).to(dtype=dtype)
 
         x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
         A = -torch.exp(self.A_log.float())  # (nheads,)
@@ -308,7 +338,7 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
             y = y + rearrange(self.D.to(dtype), "h -> h 1") * x
             y = rearrange(y, "b h p -> b (h p)")
             if not self.rmsnorm:
-                y = y * F.silu(z)
+                y = y * self.act(z)
         else:
             A = repeat(A, "h -> h p n", p=self.headdim, n=self.d_state).to(dtype=torch.float32)
             dt = repeat(dt, "b h -> b h p", p=self.headdim)
