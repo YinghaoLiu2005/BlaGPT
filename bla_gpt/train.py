@@ -151,7 +151,7 @@ class Hyperparameters(Coqpit):
     batch_size: int = 128  # batch size, in sequences, across all devices
     device_batch_size: int = 8  # batch size, in sequences, per device, grad_accum_steps = batch_size // num_devices /// device_batch_size
     sequence_length: int = 1024  # sequence length, in tokens
-    num_iterations: int = 25500  # number of iterations to run
+    num_iterations: int = 10000  # number of iterations to run
 
     # optimizer
     optimizer_name: str = "Adam"

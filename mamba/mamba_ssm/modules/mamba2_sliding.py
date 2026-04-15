@@ -17,10 +17,10 @@ from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 from mamba_ssm.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 from mamba_ssm.distributed.distributed_utils import all_reduce, reduce_scatter
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
-from mamba_ssm.ops.triton.ssd_combined_sliding import (
+from mamba_ssm.ops.triton.sliding_window_attention import (
     prefill_sliding_window_cache,
-    sliding_window_attention,
     sliding_window_attention_step,
+    sliding_window_attention,
 )
 
 from huggingface_hub import PyTorchModelHubMixin
@@ -56,7 +56,7 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
         bias=False,
         conv_bias=True,
         chunk_size=256,
-        use_mem_eff_path=False,
+        use_mem_eff_path=True,
         layer_idx=None,
         process_group=None,
         sequence_parallel=True,
@@ -92,14 +92,8 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
         self.chunk_size = chunk_size
         self.use_mem_eff_path = use_mem_eff_path
         self.layer_idx = layer_idx
-        # Use reasonable window size, not d_conv (which is typically only 4)
-        self.window_size = window_size if window_size is not None else 512
-        if self.window_size < self.d_conv:
-            import warnings
-            warnings.warn(f"window_size ({self.window_size}) is smaller than d_conv ({self.d_conv}). "
-                         f"This may limit the model's ability to capture local context.")
+        self.window_size = self.d_conv if window_size is None else window_size
 
-        # Order: [z, x, B, C, dt]
         d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
         if self.process_group is None:
             self.in_proj = nn.Linear(self.d_model, d_in_proj, bias=bias, **factory_kwargs)
@@ -123,26 +117,17 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
             self.num_kv_heads = _resolve_num_heads(self.conv_dim, self.num_kv_heads - 1)
         self.attn_head_dim = self.conv_dim // self.attn_num_heads
 
-        self.q_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=bias, **factory_kwargs)
         kv_dim = self.num_kv_heads * self.attn_head_dim
-        self.k_proj = nn.Linear(self.conv_dim, kv_dim, bias=bias, **factory_kwargs)
-        self.v_proj = nn.Linear(self.conv_dim, kv_dim, bias=bias, **factory_kwargs)
-        self.xbc_out_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=bias, **factory_kwargs)
-        
-        # Initialize projection weights with smaller scale to prevent initial NaN
-        with torch.no_grad():
-            nn.init.xavier_uniform_(self.q_proj.weight, gain=0.5)
-            nn.init.xavier_uniform_(self.k_proj.weight, gain=0.5)
-            nn.init.xavier_uniform_(self.v_proj.weight, gain=0.5)
-            nn.init.xavier_uniform_(self.xbc_out_proj.weight, gain=0.5)
-            if self.q_proj.bias is not None:
-                nn.init.zeros_(self.q_proj.bias)
-            if self.k_proj.bias is not None:
-                nn.init.zeros_(self.k_proj.bias)
-            if self.v_proj.bias is not None:
-                nn.init.zeros_(self.v_proj.bias)
-            if self.xbc_out_proj.bias is not None:
-                nn.init.zeros_(self.xbc_out_proj.bias)
+        self.q_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=conv_bias, **factory_kwargs)
+        self.k_proj = nn.Linear(self.conv_dim, kv_dim, bias=conv_bias, **factory_kwargs)
+        self.v_proj = nn.Linear(self.conv_dim, kv_dim, bias=conv_bias, **factory_kwargs)
+        self.xbc_out_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=conv_bias, **factory_kwargs)
+        if self.conv_init is not None:
+            nn.init.uniform_(self.q_proj.weight, -self.conv_init, self.conv_init)
+            nn.init.uniform_(self.k_proj.weight, -self.conv_init, self.conv_init)
+            nn.init.uniform_(self.v_proj.weight, -self.conv_init, self.conv_init)
+            nn.init.uniform_(self.xbc_out_proj.weight, -self.conv_init, self.conv_init)
+
         self.act = nn.SiLU()
 
         dt = torch.exp(
@@ -164,6 +149,7 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
         self.D._no_weight_decay = True
 
         if self.rmsnorm:
+            assert RMSNormGated is not None
             self.norm = RMSNormGated(
                 self.d_ssm,
                 eps=1e-5,
@@ -184,14 +170,7 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
                 **factory_kwargs,
             )
 
-    def _mix_xbc(self, xBC, seq_idx=None):
-        """Apply sliding window attention to xBC.
-        
-        Memory-efficient implementation that:
-        1. Uses Flash Attention 2 for O(N) memory complexity
-        2. Frees intermediate tensors aggressively
-        3. Avoids NaN checks in forward pass for speed (rely on autograd)
-        """
+    def _mix_xbc(self, xBC, seq_idx=None, cu_seqlens=None):
         xBC = sliding_window_attention(
             xBC,
             q_proj_weight=self.q_proj.weight,
@@ -206,6 +185,7 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
             num_kv_heads=self.num_kv_heads,
             window_size=self.window_size,
             seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
             training=self.training,
         )
         return self.act(xBC)
@@ -220,9 +200,9 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
         """
         seqlen_og = seqlen
         if seqlen is None:
-            batch, seqlen, _ = u.shape
+            batch, seqlen, dim = u.shape
         else:
-            batch_seqlen, _ = u.shape
+            batch_seqlen, dim = u.shape
             batch = batch_seqlen // seqlen
 
         conv_state, ssm_state = None, None
@@ -233,80 +213,79 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
                 out, _, _ = self.step(u, conv_state, ssm_state)
                 return out
 
-        zxbcdt = self.in_proj(u)  # (B, L, d_in_proj) or (B * L, d_in_proj)
+        zxbcdt = self.in_proj(u)
         if seqlen_og is not None:
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
-        # If the model is loaded in fp16, without the .float() here, A might be -inf
-        A = -torch.exp(self.A_log.float())  # (nheads) or (d_inner, d_state)
+        A = -torch.exp(self.A_log.float())
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
-
-        if self.use_mem_eff_path and inference_params is None:
-            raise NotImplementedError("Mamba2Sliding does not support the fused mem-efficient path.")
-        else:
-            if cu_seqlens is not None:
-                raise NotImplementedError("Mamba2Sliding does not support cu_seqlens/varlen packing.")
-            d_mlp = (zxbcdt.shape[-1] - 2 * self.d_ssm - 2 * self.ngroups * self.d_state - self.nheads) // 2
-            z0, x0, z, xBC, dt = torch.split(
-                zxbcdt,
-                [d_mlp, d_mlp, self.d_ssm, self.d_ssm + 2 * self.ngroups * self.d_state, self.nheads],
-                dim=-1
-            )
-            if conv_state is not None:
-                prefill_sliding_window_cache(
-                    xBC,
-                    conv_state,
-                    k_proj_weight=self.k_proj.weight,
-                    v_proj_weight=self.v_proj.weight,
-                    k_proj_bias=self.k_proj.bias,
-                    v_proj_bias=self.v_proj.bias,
-                    num_kv_heads=self.num_kv_heads,
-                )
-            xBC = self._mix_xbc(xBC, seq_idx=seq_idx)
-            x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
-            y = mamba_chunk_scan_combined(
-                rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
-                dt,
-                A,
-                rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
-                rearrange(C, "b l (g n) -> b l g n", g=self.ngroups),
-                chunk_size=self.chunk_size,
-                D=rearrange(self.D, "(h p) -> h p", p=self.headdim) if self.D_has_hdim else self.D,
-                z=rearrange(z, "b l (h p) -> b l h p", p=self.headdim) if not self.rmsnorm else None,
-                dt_bias=self.dt_bias,
-                dt_softplus=True,
+        d_mlp = (zxbcdt.shape[-1] - 2 * self.d_ssm - 2 * self.ngroups * self.d_state - self.nheads) // 2
+        z0, x0, z, xBC, dt = torch.split(
+            zxbcdt,
+            [d_mlp, d_mlp, self.d_ssm, self.d_ssm + 2 * self.ngroups * self.d_state, self.nheads],
+            dim=-1,
+        )
+        if conv_state is not None:
+            prefill_sliding_window_cache(
+                xBC,
+                conv_state,
+                k_proj_weight=self.k_proj.weight,
+                v_proj_weight=self.v_proj.weight,
+                k_proj_bias=self.k_proj.bias,
+                v_proj_bias=self.v_proj.bias,
+                num_kv_heads=self.num_kv_heads,
+                cu_seqlens=cu_seqlens,
                 seq_idx=seq_idx,
-                **dt_limit_kwargs,
-                return_final_states=ssm_state is not None,
-                return_varlen_states=False,
             )
-            if ssm_state is not None:
-                y, last_state = y
+        xBC = self._mix_xbc(xBC, seq_idx=seq_idx, cu_seqlens=cu_seqlens)
+        x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
+        y = mamba_chunk_scan_combined(
+            rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
+            dt,
+            A,
+            rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
+            rearrange(C, "b l (g n) -> b l g n", g=self.ngroups),
+            chunk_size=self.chunk_size,
+            D=rearrange(self.D, "(h p) -> h p", p=self.headdim) if self.D_has_hdim else self.D,
+            z=rearrange(z, "b l (h p) -> b l h p", p=self.headdim) if not self.rmsnorm else None,
+            dt_bias=self.dt_bias,
+            dt_softplus=True,
+            seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            **dt_limit_kwargs,
+            return_final_states=ssm_state is not None,
+            return_varlen_states=cu_seqlens is not None and inference_params is not None,
+        )
+        if ssm_state is not None:
+            y, last_state, *rest = y
+            if cu_seqlens is None:
                 ssm_state.copy_(last_state)
-            y = rearrange(y, "b l h p -> b l (h p)")
-            if self.rmsnorm:
-                y = self.norm(y, z)
-            if d_mlp > 0:
-                y = torch.cat([F.silu(z0) * x0, y], dim=-1)
-            if seqlen_og is not None:
-                y = rearrange(y, "b l d -> (b l) d")
-            out = self.out_proj(y)
-            if self.process_group is not None:
-                reduce_fn = reduce_scatter if self.sequence_parallel else all_reduce
-                out = reduce_fn(out, self.process_group)
+            else:
+                varlen_states = rest[0]
+                ssm_state.copy_(varlen_states)
+        y = rearrange(y, "b l h p -> b l (h p)")
+        if self.rmsnorm:
+            y = self.norm(y, z)
+        if d_mlp > 0:
+            y = torch.cat([F.silu(z0) * x0, y], dim=-1)
+        if seqlen_og is not None:
+            y = rearrange(y, "b l d -> (b l) d")
+        out = self.out_proj(y)
+        if self.process_group is not None:
+            reduce_fn = reduce_scatter if self.sequence_parallel else all_reduce
+            out = reduce_fn(out, self.process_group)
         return out
 
     def step(self, hidden_states, conv_state, ssm_state):
         dtype = hidden_states.dtype
         assert hidden_states.shape[1] == 1, "Only support decoding with 1 token at a time for now"
-        zxbcdt = self.in_proj(hidden_states.squeeze(1))  # (B 2D)
+        zxbcdt = self.in_proj(hidden_states.squeeze(1))
         d_mlp = (zxbcdt.shape[-1] - 2 * self.d_ssm - 2 * self.ngroups * self.d_state - self.nheads) // 2
         z0, x0, z, xBC, dt = torch.split(
             zxbcdt,
             [d_mlp, d_mlp, self.d_ssm, self.d_ssm + 2 * self.ngroups * self.d_state, self.nheads],
-            dim=-1
+            dim=-1,
         )
 
-        # Sliding-attention step
         xBC = sliding_window_attention_step(
             xBC,
             conv_state,
@@ -324,9 +303,8 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
         xBC = self.act(xBC).to(dtype=dtype)
 
         x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
-        A = -torch.exp(self.A_log.float())  # (nheads,)
+        A = -torch.exp(self.A_log.float())
 
-        # SSM step
         if selective_state_update is None:
             assert self.ngroups == 1, "Only support ngroups=1 for this inference code path"
             dt = F.softplus(dt + self.dt_bias.to(dtype=dt.dtype))
@@ -362,7 +340,6 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
                 dt_softplus=True,
             )
             y = rearrange(y, "b h p -> b (h p)")
-
         if self.rmsnorm:
             y = self.norm(y, z)
         if d_mlp > 0:
@@ -390,7 +367,7 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
                 device=device,
                 dtype=conv_dtype,
             ),
-            "filled": torch.zeros((), device=device, dtype=torch.int32),
+            "filled": torch.zeros(batch_size, device=device, dtype=torch.int32),
         }
         ssm_dtype = self.in_proj.weight.dtype if dtype is None else dtype
         ssm_state = torch.zeros(
@@ -402,10 +379,11 @@ class Mamba2Sliding(nn.Module, PyTorchModelHubMixin):
         assert self.layer_idx is not None
         if self.layer_idx not in inference_params.key_value_memory_dict:
             inference_params.key_value_memory_dict[self.layer_idx] = self.allocate_inference_cache(batch_size, 0)
-        conv_state, ssm_state = inference_params.key_value_memory_dict[self.layer_idx]
-        if initialize_states:
-            conv_state["k_cache"].zero_()
-            conv_state["v_cache"].zero_()
-            conv_state["filled"].zero_()
-            ssm_state.zero_()
-        return conv_state, ssm_state
+        else:
+            conv_state, ssm_state = inference_params.key_value_memory_dict[self.layer_idx]
+            if initialize_states:
+                conv_state["k_cache"].zero_()
+                conv_state["v_cache"].zero_()
+                conv_state["filled"].zero_()
+                ssm_state.zero_()
+        return inference_params.key_value_memory_dict[self.layer_idx]

@@ -64,7 +64,7 @@ class GPTConfig(Coqpit):
 
     # Transformer parameters
     norm_layer: str = "rmsnorm"  # type of normalization layer to use
-    attention: str = "mamba2_sliding_kernel"  # attention type in `get_attention()`
+    attention: str = "mamba2_sliding"  # attention type in `get_attention()`
     activation: str = "polynorm"  # activation type in `get_mlp()`
     polycom_order: int = 3  # order of polynomial for PolyCom activations (polyrelu/polynorm)
     use_soft_logit_capping: bool = False
@@ -375,6 +375,21 @@ def get_mlp(config, layer_idx=None):
     raise ValueError(f"Unrecognized activation type {config.activation}")
 
 
+def _call_module_with_supported_kwargs(module, x, **kwargs):
+    if not kwargs:
+        return module(x)
+    try:
+        signature = inspect.signature(module.forward)
+    except (TypeError, ValueError):
+        return module(x, **kwargs)
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return module(x, **kwargs)
+    supported_kwargs = {
+        key: value for key, value in kwargs.items() if key in signature.parameters
+    }
+    return module(x, **supported_kwargs)
+
+
 class MultiTokenPredictionHead(nn.Module):
     """Head for predicting multiple future tokens"""
 
@@ -417,8 +432,22 @@ class Mamba2Wrapper(nn.Module):
             layer_idx=depth,
         )
 
-    def forward(self, x, **kwargs):
-        return self.mamba(x, **kwargs)
+    @torch.compiler.disable
+    def forward(
+        self,
+        x,
+        seqlen=None,
+        seq_idx=None,
+        cu_seqlens=None,
+        inference_params=None,
+    ):
+        return self.mamba(
+            x,
+            seqlen=seqlen,
+            seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            inference_params=inference_params,
+        )
 
 
 class Mamba2SlidingWrapper(nn.Module):
@@ -445,14 +474,28 @@ class Mamba2SlidingWrapper(nn.Module):
             bias=config.bias,
             conv_bias=config.mamba_conv_bias,
             chunk_size=config.mamba_chunk_size,
-            use_mem_eff_path=False,
+            use_mem_eff_path=config.mamba_use_mem_eff_path,
             layer_idx=depth,
             window_size=config.mamba_window_size,
             num_kv_heads=config.mamba_num_kv_heads,
         )
 
-    def forward(self, x, **kwargs):
-        return self.mamba(x, **kwargs)
+    @torch.compiler.disable
+    def forward(
+        self,
+        x,
+        seqlen=None,
+        seq_idx=None,
+        cu_seqlens=None,
+        inference_params=None,
+    ):
+        return self.mamba(
+            x,
+            seqlen=seqlen,
+            seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            inference_params=inference_params,
+        )
 
 class Mamba2SlidingKernelWrapper(nn.Module):
     def __init__(self, config, depth=None):
@@ -485,8 +528,22 @@ class Mamba2SlidingKernelWrapper(nn.Module):
         )
 
 
-    def forward(self, x, **kwargs):
-        return self.mamba(x, **kwargs)
+    @torch.compiler.disable
+    def forward(
+        self,
+        x,
+        seqlen=None,
+        seq_idx=None,
+        cu_seqlens=None,
+        inference_params=None,
+    ):
+        return self.mamba(
+            x,
+            seqlen=seqlen,
+            seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            inference_params=inference_params,
+        )
 #
 # Transformer Block Variants
 #
@@ -514,7 +571,7 @@ class Block(nn.Module):
 
     def _process_branch(self, x, ln_pre, branch_fn, ln_post=None, res_weight=None, **kwargs):
         # Process input through branch (attention or MLP)
-        branch_out = branch_fn(ln_pre(x), **kwargs)
+        branch_out = _call_module_with_supported_kwargs(branch_fn, ln_pre(x), **kwargs)
 
         # Apply optional post-normalization
         if ln_post is not None:
@@ -581,7 +638,7 @@ class ParallelBlock(Block):
 
     def _process_branch(self, x, ln_pre, branch_fn, ln_post=None, **kwargs):
         # Process input through branch (attention or MLP)
-        branch_out = branch_fn(ln_pre(x), **kwargs)
+        branch_out = _call_module_with_supported_kwargs(branch_fn, ln_pre(x), **kwargs)
 
         # Apply optional post-normalization
         if ln_post is not None:
@@ -629,7 +686,7 @@ class CanonBlock(Block):
         branch_out = branch_out + canon_fn(branch_out)
 
         # Apply branch function (attention or MLP)
-        branch_out = branch_fn(branch_out, **kwargs)
+        branch_out = _call_module_with_supported_kwargs(branch_fn, branch_out, **kwargs)
 
         # Apply optional post-normalization
         if ln_post is not None:
@@ -825,7 +882,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, **kwargs):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, (
@@ -857,7 +914,7 @@ class GPT(nn.Module):
                     x = self.engram.mix_at_layer(x, x0, x0_ngram, layer_idx)
                 else:  # "simple" or "minimal"
                     x = x + self.engram(x, idx)
-            x = block(x, token_ids=idx)
+            x = block(x, token_ids=idx, **kwargs)
         x = self.transformer.ln_f(x)
 
         # TODO: simplify this

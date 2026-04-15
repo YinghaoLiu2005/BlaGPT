@@ -103,6 +103,7 @@ def rms_norm_forward(
     return y
 
 
+@torch.compiler.disable
 def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
                      return_last_state=False):
     """if return_last_state is True, returns (out, last_state)
@@ -370,6 +371,7 @@ class MambaInnerFn(torch.autograd.Function):
                 dB_proj_bias, dC_proj_bias, None, None, None, None, None, None)
 
 
+@torch.compiler.disable
 def mamba_inner_fn(
     xz, conv1d_weight, conv1d_bias, x_proj_weight, delta_proj_weight,
     out_proj_weight, out_proj_bias,
