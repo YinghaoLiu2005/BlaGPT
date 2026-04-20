@@ -29,7 +29,7 @@ from torch.nn import functional as F
 
 from mamba_ssm import Mamba2
 from mamba_ssm.modules.mamba2_sliding import Mamba2Sliding
-from mamba_ssm.modules.mamba2_sliding_kernel import Mamba2SlidingKernel
+from mamba_ssm.modules.mamba2_sliding_test import Mamba2SlidingTest
 
 
 #
@@ -64,7 +64,7 @@ class GPTConfig(Coqpit):
 
     # Transformer parameters
     norm_layer: str = "rmsnorm"  # type of normalization layer to use
-    attention: str = "mamba2_sliding"  # attention type in `get_attention()`
+    attention: str = "mamba2_sliding_test"  # attention type in `get_attention()`
     activation: str = "polynorm"  # activation type in `get_mlp()`
     polycom_order: int = 3  # order of polynomial for PolyCom activations (polyrelu/polynorm)
     use_soft_logit_capping: bool = False
@@ -141,7 +141,7 @@ class GPTConfig(Coqpit):
     mamba_conv_bias: bool = True
     mamba_chunk_size: int = 256
     mamba_use_mem_eff_path: bool = True
-    mamba_window_size: int = 4
+    mamba_window_size: int = 512
     mamba_num_kv_heads: int = None
 
     # KDA interleaving parameters (like Kimi-Linear's 3:1 KDA-to-full-attention ratio)
@@ -333,8 +333,8 @@ def get_attention(config, depth=None):
         return Mamba2Wrapper(config, depth)
     elif attn_type == "mamba2_sliding":
         return Mamba2SlidingWrapper(config, depth)
-    elif attn_type == "mamba2_sliding_kernel":
-        return Mamba2SlidingKernelWrapper(config, depth)
+    elif attn_type == "mamba2_sliding_test":
+        return Mamba2SlidingTestWrapper(config, depth)
     raise ValueError(f"Unrecognized attention type {attn_type}")
 
 
@@ -497,13 +497,13 @@ class Mamba2SlidingWrapper(nn.Module):
             inference_params=inference_params,
         )
 
-class Mamba2SlidingKernelWrapper(nn.Module):
+class Mamba2SlidingTestWrapper(nn.Module):
     def __init__(self, config, depth=None):
         super().__init__()
-        if Mamba2SlidingKernel is None:
-            raise ImportError("Mamba2SlidingKernel is unavailable. Ensure mamba_ssm is importable in this environment.")
+        if Mamba2SlidingTest is None:
+            raise ImportError("Mamba2SlidingTest is unavailable. Ensure mamba_ssm is importable in this environment.")
         headdim = config.mamba_headdim or (config.n_embd // config.n_head)
-        self.mamba = Mamba2SlidingKernel(
+        self.mamba = Mamba2SlidingTest(
             d_model=config.n_embd,
             d_state=config.mamba_d_state,
             d_conv=config.mamba_d_conv,

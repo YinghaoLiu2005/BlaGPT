@@ -281,7 +281,7 @@ if __name__ == "__main__":
     model = DDP(
         model,
         device_ids=[ddp_local_rank],
-        find_unused_parameters=False,
+        find_unused_parameters=True,
         broadcast_buffers=False,
         gradient_as_bucket_view=True,
     )

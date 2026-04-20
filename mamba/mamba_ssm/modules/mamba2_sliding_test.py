@@ -17,11 +17,10 @@ from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 from mamba_ssm.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 from mamba_ssm.distributed.distributed_utils import all_reduce, reduce_scatter
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
-from mamba_ssm.ops.triton.ssd_combined_sliding_kernel import (
-    mamba_split_sliding_window_scan_combined,
-    _sparse_sliding_window_attention_kernel,
+from mamba_ssm.ops.triton.sliding_window_attention import (
     prefill_sliding_window_cache,
     sliding_window_attention_step,
+    sliding_window_attention,
 )
 
 from huggingface_hub import PyTorchModelHubMixin
@@ -35,7 +34,7 @@ def _resolve_num_heads(total_dim: int, preferred_heads: int) -> int:
     return 1
 
 
-class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
+class Mamba2SlidingTest(nn.Module, PyTorchModelHubMixin):
     def __init__(
         self,
         d_model,
@@ -66,7 +65,6 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
         window_size=512,
         num_kv_heads=None,
     ):
-        del conv_bias
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.d_model = d_model
@@ -119,11 +117,17 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
             self.num_kv_heads = _resolve_num_heads(self.conv_dim, self.num_kv_heads - 1)
         self.attn_head_dim = self.conv_dim // self.attn_num_heads
 
-        self.q_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=bias, **factory_kwargs)
         kv_dim = self.num_kv_heads * self.attn_head_dim
-        self.k_proj = nn.Linear(self.conv_dim, kv_dim, bias=bias, **factory_kwargs)
-        self.v_proj = nn.Linear(self.conv_dim, kv_dim, bias=bias, **factory_kwargs)
-        self.xbc_out_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=bias, **factory_kwargs)
+        self.q_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=conv_bias, **factory_kwargs)
+        self.k_proj = nn.Linear(self.conv_dim, kv_dim, bias=conv_bias, **factory_kwargs)
+        self.v_proj = nn.Linear(self.conv_dim, kv_dim, bias=conv_bias, **factory_kwargs)
+        self.xbc_out_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=conv_bias, **factory_kwargs)
+        if self.conv_init is not None:
+            nn.init.uniform_(self.q_proj.weight, -self.conv_init, self.conv_init)
+            nn.init.uniform_(self.k_proj.weight, -self.conv_init, self.conv_init)
+            nn.init.uniform_(self.v_proj.weight, -self.conv_init, self.conv_init)
+            nn.init.uniform_(self.xbc_out_proj.weight, -self.conv_init, self.conv_init)
+
         self.act = nn.SiLU()
 
         dt = torch.exp(
@@ -145,6 +149,7 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
         self.D._no_weight_decay = True
 
         if self.rmsnorm:
+            assert RMSNormGated is not None
             self.norm = RMSNormGated(
                 self.d_ssm,
                 eps=1e-5,
@@ -165,12 +170,8 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
                 **factory_kwargs,
             )
 
-    def _mix_xbc(self, xBC, seq_idx=None):
-        """
-        Apply sparse sliding window attention to xBC.
-        Uses _sparse_sliding_window_attention_kernel for true sparse computation.
-        """
-        xBC = _sparse_sliding_window_attention_kernel(
+    def _mix_xbc(self, xBC, seq_idx=None, cu_seqlens=None):
+        xBC = sliding_window_attention(
             xBC,
             q_proj_weight=self.q_proj.weight,
             k_proj_weight=self.k_proj.weight,
@@ -184,15 +185,24 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
             num_kv_heads=self.num_kv_heads,
             window_size=self.window_size,
             seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            training=self.training,
         )
         return self.act(xBC)
 
     def forward(self, u, seqlen=None, seq_idx=None, cu_seqlens=None, inference_params=None):
+        """
+        u: (batch, seqlen, hidden_dim) if seqlen=None.
+            If seqlen is not None, u is (batch * seqlen, hidden_dim). This is so that when we
+            split u during sequence parallel, we split the batch * seqlen dimension
+            (in case batch is small).
+        Returns: same shape as u
+        """
         seqlen_og = seqlen
         if seqlen is None:
-            batch, seqlen, _ = u.shape
+            batch, seqlen, dim = u.shape
         else:
-            batch_seqlen, _ = u.shape
+            batch_seqlen, dim = u.shape
             batch = batch_seqlen // seqlen
 
         conv_state, ssm_state = None, None
@@ -208,46 +218,6 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
             zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
         A = -torch.exp(self.A_log.float())
         dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
-
-        if self.use_mem_eff_path and inference_params is None:
-            out = mamba_split_sliding_window_scan_combined(
-                zxbcdt,
-                self.q_proj.weight,
-                self.k_proj.weight,
-                self.v_proj.weight,
-                self.xbc_out_proj.weight,
-                self.dt_bias,
-                A,
-                D=rearrange(self.D, "(h p) -> h p", p=self.headdim) if self.D_has_hdim else self.D,
-                chunk_size=self.chunk_size,
-                initial_states=None,
-                seq_idx=seq_idx,
-                activation=self.activation,
-                rmsnorm_weight=self.norm.weight if self.rmsnorm else None,
-                rmsnorm_eps=self.norm.eps if self.rmsnorm else 1e-6,
-                outproj_weight=self.out_proj.weight,
-                outproj_bias=self.out_proj.bias,
-                q_proj_bias=self.q_proj.bias,
-                k_proj_bias=self.k_proj.bias,
-                v_proj_bias=self.v_proj.bias,
-                out_proj_bias_attn=self.xbc_out_proj.bias,
-                headdim=None if self.D_has_hdim else self.headdim,
-                ngroups=self.ngroups,
-                norm_before_gate=self.norm_before_gate,
-                window_size=self.window_size,
-                num_heads=self.attn_num_heads,
-                num_kv_heads=self.num_kv_heads,
-                **dt_limit_kwargs,
-            )
-            if seqlen_og is not None:
-                out = rearrange(out, "b l d -> (b l) d")
-            if self.process_group is not None:
-                reduce_fn = reduce_scatter if self.sequence_parallel else all_reduce
-                out = reduce_fn(out, self.process_group)
-            return out
-
-        if cu_seqlens is not None:
-            raise NotImplementedError("Mamba2SlidingKernel does not support cu_seqlens/varlen packing.")
         d_mlp = (zxbcdt.shape[-1] - 2 * self.d_ssm - 2 * self.ngroups * self.d_state - self.nheads) // 2
         z0, x0, z, xBC, dt = torch.split(
             zxbcdt,
@@ -263,29 +233,37 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
                 k_proj_bias=self.k_proj.bias,
                 v_proj_bias=self.v_proj.bias,
                 num_kv_heads=self.num_kv_heads,
+                cu_seqlens=cu_seqlens,
+                seq_idx=seq_idx,
             )
-        xBC = self._mix_xbc(xBC, seq_idx=seq_idx)
+        xBC = self._mix_xbc(xBC, seq_idx=seq_idx, cu_seqlens=cu_seqlens)
         x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
-        y = mamba_chunk_scan_combined(
-            rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
-            dt,
-            A,
-            rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
-            rearrange(C, "b l (g n) -> b l g n", g=self.ngroups),
-            chunk_size=self.chunk_size,
-            D=rearrange(self.D, "(h p) -> h p", p=self.headdim) if self.D_has_hdim else self.D,
-            z=rearrange(z, "b l (h p) -> b l h p", p=self.headdim) if not self.rmsnorm else None,
-            dt_bias=self.dt_bias,
-            dt_softplus=True,
-            seq_idx=seq_idx,
-            **dt_limit_kwargs,
-            return_final_states=ssm_state is not None,
-            return_varlen_states=False,
-        )
-        if ssm_state is not None:
-            y, last_state = y
-            ssm_state.copy_(last_state)
-        y = rearrange(y, "b l h p -> b l (h p)")
+        y=x
+        # y = mamba_chunk_scan_combined(
+        #     rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
+        #     dt,
+        #     A,
+        #     rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
+        #     rearrange(C, "b l (g n) -> b l g n", g=self.ngroups),
+        #     chunk_size=self.chunk_size,
+        #     D=rearrange(self.D, "(h p) -> h p", p=self.headdim) if self.D_has_hdim else self.D,
+        #     z=rearrange(z, "b l (h p) -> b l h p", p=self.headdim) if not self.rmsnorm else None,
+        #     dt_bias=self.dt_bias,
+        #     dt_softplus=True,
+        #     seq_idx=seq_idx,
+        #     cu_seqlens=cu_seqlens,
+        #     **dt_limit_kwargs,
+        #     return_final_states=ssm_state is not None,
+        #     return_varlen_states=cu_seqlens is not None and inference_params is not None,
+        # )
+        # if ssm_state is not None:
+        #     y, last_state, *rest = y
+        #     if cu_seqlens is None:
+        #         ssm_state.copy_(last_state)
+        #     else:
+        #         varlen_states = rest[0]
+        #         ssm_state.copy_(varlen_states)
+        # y = rearrange(y, "b l h p -> b l (h p)")
         if self.rmsnorm:
             y = self.norm(y, z)
         if d_mlp > 0:
@@ -329,41 +307,42 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
         A = -torch.exp(self.A_log.float())
 
         if selective_state_update is None:
-            assert self.ngroups == 1, "Only support ngroups=1 for this inference code path"
-            dt = F.softplus(dt + self.dt_bias.to(dtype=dt.dtype))
-            dA = torch.exp(dt * A)
-            x = rearrange(x, "b (h p) -> b h p", p=self.headdim)
-            dBx = torch.einsum("bh,bn,bhp->bhpn", dt, B, x)
-            ssm_state.copy_(ssm_state * rearrange(dA, "b h -> b h 1 1") + dBx)
-            y = torch.einsum("bhpn,bn->bhp", ssm_state.to(dtype), C)
-            y = y + rearrange(self.D.to(dtype), "h -> h 1") * x
-            y = rearrange(y, "b h p -> b (h p)")
+            # assert self.ngroups == 1, "Only support ngroups=1 for this inference code path"
+            # dt = F.softplus(dt + self.dt_bias.to(dtype=dt.dtype))
+            # dA = torch.exp(dt * A)
+            # x = rearrange(x, "b (h p) -> b h p", p=self.headdim)
+            # dBx = torch.einsum("bh,bn,bhp->bhpn", dt, B, x)
+            # ssm_state.copy_(ssm_state * rearrange(dA, "b h -> b h 1 1") + dBx)
+            # y = torch.einsum("bhpn,bn->bhp", ssm_state.to(dtype), C)
+            # y = y + rearrange(self.D.to(dtype), "h -> h 1") * x
+            # y = rearrange(y, "b h p -> b (h p)")
+            y=x
             if not self.rmsnorm:
                 y = y * self.act(z)
         else:
-            A = repeat(A, "h -> h p n", p=self.headdim, n=self.d_state).to(dtype=torch.float32)
-            dt = repeat(dt, "b h -> b h p", p=self.headdim)
-            dt_bias = repeat(self.dt_bias, "h -> h p", p=self.headdim)
-            D = repeat(self.D, "h -> h p", p=self.headdim)
-            B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
-            C = rearrange(C, "b (g n) -> b g n", g=self.ngroups)
-            x_reshaped = rearrange(x, "b (h p) -> b h p", p=self.headdim)
-            if not self.rmsnorm:
-                z = rearrange(z, "b (h p) -> b h p", p=self.headdim)
-            y = selective_state_update(
-                ssm_state,
-                x_reshaped,
-                dt,
-                A,
-                B,
-                C,
-                D,
-                z=z if not self.rmsnorm else None,
-                dt_bias=dt_bias,
-                dt_softplus=True,
-            )
-            y = rearrange(y, "b h p -> b (h p)")
-
+            # A = repeat(A, "h -> h p n", p=self.headdim, n=self.d_state).to(dtype=torch.float32)
+            # dt = repeat(dt, "b h -> b h p", p=self.headdim)
+            # dt_bias = repeat(self.dt_bias, "h -> h p", p=self.headdim)
+            # D = repeat(self.D, "h -> h p", p=self.headdim)
+            # B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
+            # C = rearrange(C, "b (g n) -> b g n", g=self.ngroups)
+            # x_reshaped = rearrange(x, "b (h p) -> b h p", p=self.headdim)
+            # if not self.rmsnorm:
+            #     z = rearrange(z, "b (h p) -> b h p", p=self.headdim)
+            # y = selective_state_update(
+            #     ssm_state,
+            #     x_reshaped,
+            #     dt,
+            #     A,
+            #     B,
+            #     C,
+            #     D,
+            #     z=z if not self.rmsnorm else None,
+            #     dt_bias=dt_bias,
+            #     dt_softplus=True,
+            # )
+            # y = rearrange(y, "b h p -> b (h p)")
+            y=x
         if self.rmsnorm:
             y = self.norm(y, z)
         if d_mlp > 0:
@@ -391,7 +370,7 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
                 device=device,
                 dtype=conv_dtype,
             ),
-            "filled": torch.zeros((), device=device, dtype=torch.int32),
+            "filled": torch.zeros(batch_size, device=device, dtype=torch.int32),
         }
         ssm_dtype = self.in_proj.weight.dtype if dtype is None else dtype
         ssm_state = torch.zeros(
@@ -403,10 +382,11 @@ class Mamba2SlidingKernel(nn.Module, PyTorchModelHubMixin):
         assert self.layer_idx is not None
         if self.layer_idx not in inference_params.key_value_memory_dict:
             inference_params.key_value_memory_dict[self.layer_idx] = self.allocate_inference_cache(batch_size, 0)
-        conv_state, ssm_state = inference_params.key_value_memory_dict[self.layer_idx]
-        if initialize_states:
-            conv_state["k_cache"].zero_()
-            conv_state["v_cache"].zero_()
-            conv_state["filled"].zero_()
-            ssm_state.zero_()
-        return conv_state, ssm_state
+        else:
+            conv_state, ssm_state = inference_params.key_value_memory_dict[self.layer_idx]
+            if initialize_states:
+                conv_state["k_cache"].zero_()
+                conv_state["v_cache"].zero_()
+                conv_state["filled"].zero_()
+                ssm_state.zero_()
+        return inference_params.key_value_memory_dict[self.layer_idx]
