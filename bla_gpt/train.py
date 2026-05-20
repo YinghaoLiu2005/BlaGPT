@@ -151,7 +151,7 @@ class Hyperparameters(Coqpit):
     batch_size: int = 128  # batch size, in sequences, across all devices
     device_batch_size: int = 8  # batch size, in sequences, per device, grad_accum_steps = batch_size // num_devices /// device_batch_size
     sequence_length: int = 1024  # sequence length, in tokens
-    num_iterations: int = 10000  # number of iterations to run
+    num_iterations: int = 25000  # number of iterations to run
 
     # optimizer
     optimizer_name: str = "Adam"
@@ -192,6 +192,8 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--model_name", type=str, default="bla_gpt")
     parser.add_argument("--resume",type=str, default=None, help="path to checkpoint to resume from")
+    parser.add_argument("--attention", type=str, default=None, help="Override GPTConfig.attention")
+    parser.add_argument("--mamba_window_size",type=int,default=None,help="Override GPTConfig.mamba_window_size for Mamba sliding-window layers",)
     cli_args = parser.parse_args()
 
     args = Hyperparameters()
@@ -207,6 +209,35 @@ if __name__ == "__main__":
 
     if cli_args.config:
         model_config.load_json(cli_args.config)
+
+    if cli_args.attention is not None:
+        valid_attentions = {
+            "regular",
+            "latent",
+            "DiffAttn",
+            "pattention",
+            "kvshifting",
+            "dilated",
+            "forgetting",
+            "multi-token",
+            "kda",
+            "gated",
+            "DiffAttnv2",
+            "mamba2",
+            "mamba2_new",
+            "mamba2_sliding",
+            "mamba2_sliding_test",
+        }
+        if cli_args.attention not in valid_attentions:
+            raise ValueError(
+                f"--attention must be one of {sorted(valid_attentions)}, got {cli_args.attention!r}"
+            )
+        model_config.attention = cli_args.attention
+
+    if cli_args.mamba_window_size is not None:
+        if cli_args.mamba_window_size <= 0:
+            raise ValueError("--mamba_window_size must be a positive integer")
+        model_config.mamba_window_size = cli_args.mamba_window_size
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
     assert torch.cuda.is_available()
@@ -231,6 +262,8 @@ if __name__ == "__main__":
     train_accumulation_steps = args.batch_size // (B * ddp_world_size)
     if master_process:
         print(f"Accumulation steps: {train_accumulation_steps}")
+        print(f"Attention: {model_config.attention}")
+        print(f"Mamba window size: {model_config.mamba_window_size}")
 
     # load tokens
     train_loader = DistributedDataLoader(args.input_bin, B, T, ddp_rank, ddp_world_size)
@@ -555,6 +588,7 @@ if __name__ == "__main__":
         print(
             f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB"
         )
+        print(f"Mamba window size: {model_config.mamba_window_size}")
 
     # -------------------------------------------------------------------------
     # clean up nice

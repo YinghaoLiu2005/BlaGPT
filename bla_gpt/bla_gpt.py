@@ -28,6 +28,7 @@ from norms import DyTNorm, LayerNorm, RMSNorm
 from torch.nn import functional as F
 
 from mamba_ssm import Mamba2
+from mamba_ssm.modules.mamba2_new import Mamba2 as Mamba2New
 from mamba_ssm.modules.mamba2_sliding import Mamba2Sliding
 from mamba_ssm.modules.mamba2_sliding_test import Mamba2SlidingTest
 
@@ -64,7 +65,7 @@ class GPTConfig(Coqpit):
 
     # Transformer parameters
     norm_layer: str = "rmsnorm"  # type of normalization layer to use
-    attention: str = "mamba2_sliding_test"  # attention type in `get_attention()`
+    attention: str = "regular"  # attention type in `get_attention()`
     activation: str = "polynorm"  # activation type in `get_mlp()`
     polycom_order: int = 3  # order of polynomial for PolyCom activations (polyrelu/polynorm)
     use_soft_logit_capping: bool = False
@@ -331,6 +332,8 @@ def get_attention(config, depth=None):
         return MultiheadDiffAttnv2(config)
     elif attn_type == "mamba2":
         return Mamba2Wrapper(config, depth)
+    elif attn_type == "mamba2_new":
+        return Mamba2NewWrapper(config, depth)
     elif attn_type == "mamba2_sliding":
         return Mamba2SlidingWrapper(config, depth)
     elif attn_type == "mamba2_sliding_test":
@@ -497,6 +500,55 @@ class Mamba2SlidingWrapper(nn.Module):
             inference_params=inference_params,
         )
 
+
+class Mamba2NewWrapper(nn.Module):
+    def __init__(self, config, depth=None):
+        super().__init__()
+        if Mamba2New is None:
+            raise ImportError("Mamba2New is unavailable. Ensure mamba_ssm.modules.mamba2_new is importable.")
+        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
+        self.mamba = Mamba2New(
+            d_model=config.n_embd,
+            d_state=config.mamba_d_state,
+            d_conv=config.mamba_d_conv,
+            window_size=config.mamba_window_size,
+            use_flash_swa=True,
+            expand=config.mamba_expand,
+            headdim=headdim,
+            d_ssm=config.mamba_d_ssm,
+            ngroups=config.mamba_ngroups,
+            D_has_hdim=config.mamba_D_has_hdim,
+            rmsnorm=(config.norm_layer == "rmsnorm"),
+            norm_before_gate=config.mamba_norm_before_gate,
+            dt_min=config.mamba_dt_min,
+            dt_max=config.mamba_dt_max,
+            dt_init_floor=config.mamba_dt_init_floor,
+            dt_limit=config.mamba_dt_limit,
+            bias=config.bias,
+            conv_bias=config.mamba_conv_bias,
+            chunk_size=config.mamba_chunk_size,
+            use_mem_eff_path=config.mamba_use_mem_eff_path,
+            layer_idx=depth,
+        )
+
+    @torch.compiler.disable
+    def forward(
+        self,
+        x,
+        seqlen=None,
+        seq_idx=None,
+        cu_seqlens=None,
+        inference_params=None,
+    ):
+        return self.mamba(
+            x,
+            seqlen=seqlen,
+            seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            inference_params=inference_params,
+        )
+
+
 class Mamba2SlidingTestWrapper(nn.Module):
     def __init__(self, config, depth=None):
         super().__init__()
@@ -524,7 +576,15 @@ class Mamba2SlidingTestWrapper(nn.Module):
             use_mem_eff_path=config.mamba_use_mem_eff_path,
             layer_idx=depth,
             window_size=config.mamba_window_size,
-            num_kv_heads=config.mamba_num_kv_heads,
+            num_kv_heads=config.mamba_num_kv_heads or config.n_kv_head,
+            num_heads=config.n_head,
+            dropout_p=config.dropout,
+            rmsnorm_before_qk=config.rmsnorm_before_qk,
+            pos_encoding=config.pos_encoding,
+            rope_theta=config.rope_theta,
+            block_size=config.block_size,
+            rope_variant=config.rope_variant,
+            use_qkv_bias=config.use_qkv_bias,
         )
 
 

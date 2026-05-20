@@ -1,22 +1,12 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 
-import math
+import inspect
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from einops import rearrange, repeat
-
-try:
-    from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-except ImportError:
-    selective_state_update = None
-
-from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
-from mamba_ssm.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
+from einops import rearrange
 from mamba_ssm.distributed.distributed_utils import all_reduce, reduce_scatter
-from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from mamba_ssm.ops.triton.sliding_window_attention import (
     prefill_sliding_window_cache,
     sliding_window_attention_step,
@@ -26,12 +16,20 @@ from mamba_ssm.ops.triton.sliding_window_attention import (
 from huggingface_hub import PyTorchModelHubMixin
 
 
-def _resolve_num_heads(total_dim: int, preferred_heads: int) -> int:
-    preferred_heads = min(total_dim, max(1, preferred_heads))
-    for heads in range(preferred_heads, 0, -1):
-        if total_dim % heads == 0:
-            return heads
-    return 1
+_SWA_SIGNATURES = {
+    "sliding_window_attention": inspect.signature(sliding_window_attention).parameters,
+    "prefill_sliding_window_cache": inspect.signature(prefill_sliding_window_cache).parameters,
+    "sliding_window_attention_step": inspect.signature(sliding_window_attention_step).parameters,
+}
+
+
+def _filter_supported_kwargs(fn_name: str, kwargs: dict) -> dict:
+    supported = _SWA_SIGNATURES[fn_name]
+    return {key: value for key, value in kwargs.items() if key in supported}
+
+
+def _maybe_cast(tensor, dtype):
+    return None if tensor is None else tensor.to(dtype=dtype)
 
 
 class Mamba2SlidingTest(nn.Module, PyTorchModelHubMixin):
@@ -64,131 +62,132 @@ class Mamba2SlidingTest(nn.Module, PyTorchModelHubMixin):
         dtype=None,
         window_size=512,
         num_kv_heads=None,
+        num_heads=None,
+        dropout_p=0.0,
+        rmsnorm_before_qk=False,
+        pos_encoding=None,
+        rope_theta=10000,
+        block_size=1024,
+        rope_variant="standard",
+        use_qkv_bias=False,
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.d_model = d_model
-        self.d_state = d_state
         self.d_conv = d_conv
         self.conv_init = conv_init
-        self.expand = expand
         self.process_group = process_group
         self.sequence_parallel = sequence_parallel
         self.world_size = 1 if process_group is None else process_group.size()
-        self.local_rank = 0 if process_group is None else process_group.rank()
-        self.d_inner = (self.expand * self.d_model) // self.world_size
-        assert self.d_inner * self.world_size == self.expand * self.d_model
-        self.headdim = headdim
-        self.d_ssm = self.d_inner if d_ssm is None else d_ssm // self.world_size
-        assert ngroups % self.world_size == 0
-        self.ngroups = ngroups // self.world_size
-        assert self.d_ssm % self.headdim == 0
-        self.nheads = self.d_ssm // self.headdim
-        self.D_has_hdim = D_has_hdim
-        self.rmsnorm = rmsnorm
-        self.norm_before_gate = norm_before_gate
-        self.dt_limit = dt_limit
-        self.activation = "silu"
-        self.chunk_size = chunk_size
-        self.use_mem_eff_path = use_mem_eff_path
         self.layer_idx = layer_idx
         self.window_size = self.d_conv if window_size is None else window_size
 
-        d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
-        if self.process_group is None:
-            self.in_proj = nn.Linear(self.d_model, d_in_proj, bias=bias, **factory_kwargs)
-        else:
-            self.in_proj = ColumnParallelLinear(
-                self.d_model,
-                d_in_proj * self.world_size,
-                bias=bias,
-                process_group=self.process_group,
-                sequence_parallel=self.sequence_parallel,
-                **factory_kwargs,
+        if num_heads is None:
+            if headdim is None:
+                raise ValueError("Pass either num_heads or headdim for transformer-style SWA.")
+            if d_model % headdim != 0:
+                raise ValueError(f"d_model={d_model} must be divisible by headdim={headdim}.")
+            num_heads = d_model // headdim
+        if d_model % num_heads != 0:
+            raise ValueError(f"d_model={d_model} must be divisible by num_heads={num_heads}.")
+        self.attn_num_heads = num_heads
+        self.attn_head_dim = d_model // num_heads
+        self.num_kv_heads = self.attn_num_heads if num_kv_heads is None else num_kv_heads
+        if self.attn_num_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                f"num_heads={self.attn_num_heads} must be divisible by num_kv_heads={self.num_kv_heads}."
             )
+        if self.attn_head_dim % 2 != 0:
+            raise ValueError("SWA RoPE/cache helpers require an even attention head dimension.")
 
-        self.conv_dim = self.d_ssm + 2 * self.ngroups * self.d_state
-        preferred_q_heads = self.conv_dim // self.headdim if self.conv_dim % self.headdim == 0 else self.nheads
-        self.attn_num_heads = _resolve_num_heads(self.conv_dim, preferred_q_heads)
-        preferred_kv_heads = self.ngroups if num_kv_heads is None else num_kv_heads
-        preferred_kv_heads = min(self.attn_num_heads, preferred_kv_heads)
-        self.num_kv_heads = _resolve_num_heads(self.conv_dim, preferred_kv_heads)
-        while self.attn_num_heads % self.num_kv_heads != 0:
-            self.num_kv_heads = _resolve_num_heads(self.conv_dim, self.num_kv_heads - 1)
-        self.attn_head_dim = self.conv_dim // self.attn_num_heads
+        self.dropout_p = dropout_p
+        self.pos_encoding = pos_encoding
+        self.rope_variant = rope_variant
+        self.rmsnorm_before_qk = rmsnorm_before_qk
+        self.norm_eps = 1e-5
 
+        qkv_bias = bias or use_qkv_bias
         kv_dim = self.num_kv_heads * self.attn_head_dim
-        self.q_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=conv_bias, **factory_kwargs)
-        self.k_proj = nn.Linear(self.conv_dim, kv_dim, bias=conv_bias, **factory_kwargs)
-        self.v_proj = nn.Linear(self.conv_dim, kv_dim, bias=conv_bias, **factory_kwargs)
-        self.xbc_out_proj = nn.Linear(self.conv_dim, self.conv_dim, bias=conv_bias, **factory_kwargs)
+        self.q_proj = nn.Linear(self.d_model, self.d_model, bias=qkv_bias, **factory_kwargs)
+        self.k_proj = nn.Linear(self.d_model, kv_dim, bias=qkv_bias, **factory_kwargs)
+        self.v_proj = nn.Linear(self.d_model, kv_dim, bias=qkv_bias, **factory_kwargs)
+        self.out_proj = nn.Linear(self.d_model, self.d_model, bias=bias, **factory_kwargs)
         if self.conv_init is not None:
             nn.init.uniform_(self.q_proj.weight, -self.conv_init, self.conv_init)
             nn.init.uniform_(self.k_proj.weight, -self.conv_init, self.conv_init)
             nn.init.uniform_(self.v_proj.weight, -self.conv_init, self.conv_init)
-            nn.init.uniform_(self.xbc_out_proj.weight, -self.conv_init, self.conv_init)
+            nn.init.uniform_(self.out_proj.weight, -self.conv_init, self.conv_init)
 
-        self.act = nn.SiLU()
-
-        dt = torch.exp(
-            torch.rand(self.nheads, **factory_kwargs) * (math.log(dt_max) - math.log(dt_min))
-            + math.log(dt_min)
-        )
-        dt = torch.clamp(dt, min=dt_init_floor)
-        inv_dt = dt + torch.log(-torch.expm1(-dt))
-        self.dt_bias = nn.Parameter(inv_dt)
-        self.dt_bias._no_weight_decay = True
-
-        assert A_init_range[0] > 0 and A_init_range[1] >= A_init_range[0]
-        A = torch.empty(self.nheads, dtype=torch.float32, device=device).uniform_(*A_init_range)
-        A_log = torch.log(A).to(dtype=dtype)
-        self.A_log = nn.Parameter(A_log)
-        self.A_log._no_weight_decay = True
-
-        self.D = nn.Parameter(torch.ones(self.d_ssm if self.D_has_hdim else self.nheads, device=device))
-        self.D._no_weight_decay = True
-
-        if self.rmsnorm:
-            assert RMSNormGated is not None
-            self.norm = RMSNormGated(
-                self.d_ssm,
-                eps=1e-5,
-                norm_before_gate=self.norm_before_gate,
-                group_size=self.d_ssm // ngroups,
-                **factory_kwargs,
-            )
-
-        if self.process_group is None:
-            self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
+        if self.rmsnorm_before_qk:
+            self.q_norm_weight = nn.Parameter(torch.ones(self.attn_head_dim, **factory_kwargs))
+            self.k_norm_weight = nn.Parameter(torch.ones(self.attn_head_dim, **factory_kwargs))
         else:
-            self.out_proj = RowParallelLinear(
-                self.d_inner * self.world_size,
-                self.d_model,
-                bias=bias,
-                process_group=self.process_group,
-                sequence_parallel=self.sequence_parallel,
-                **factory_kwargs,
-            )
+            self.q_norm_weight = None
+            self.k_norm_weight = None
 
-    def _mix_xbc(self, xBC, seq_idx=None, cu_seqlens=None):
-        xBC = sliding_window_attention(
-            xBC,
-            q_proj_weight=self.q_proj.weight,
-            k_proj_weight=self.k_proj.weight,
-            v_proj_weight=self.v_proj.weight,
-            out_proj_weight=self.xbc_out_proj.weight,
-            q_proj_bias=self.q_proj.bias,
-            k_proj_bias=self.k_proj.bias,
-            v_proj_bias=self.v_proj.bias,
-            out_proj_bias=self.xbc_out_proj.bias,
-            num_heads=self.attn_num_heads,
-            num_kv_heads=self.num_kv_heads,
-            window_size=self.window_size,
-            seq_idx=seq_idx,
-            cu_seqlens=cu_seqlens,
-            training=self.training,
+        if self.pos_encoding == "rotary":
+            if self.rope_variant != "standard":
+                raise ValueError("Mamba2SlidingTest SWA baseline only supports standard RoPE.")
+            inv_freq = 1.0 / (
+                rope_theta
+                ** (torch.arange(0, self.attn_head_dim, 2, device=device, dtype=torch.float32) / self.attn_head_dim)
+            )
+            self.register_buffer("rotary_inv_freq", inv_freq, persistent=False)
+            self.rotary_block_size = block_size
+        elif self.pos_encoding in ("none", None):
+            self.rotary_inv_freq = None
+        else:
+            raise ValueError(f"Mamba2SlidingTest SWA baseline does not support pos_encoding={self.pos_encoding}.")
+
+    def _position_ids(self, batch, seqlen, device, cu_seqlens=None, seq_idx=None, offset=0):
+        if self.pos_encoding != "rotary":
+            return None
+        if cu_seqlens is not None:
+            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            return torch.cat([torch.arange(int(length.item()), device=device) for length in lengths]).to(torch.long)
+        if seq_idx is not None:
+            return torch.arange(seqlen, device=device).unsqueeze(0).expand(batch, seqlen)
+        return torch.arange(offset, offset + seqlen, device=device).unsqueeze(0).expand(batch, seqlen)
+
+    def _attention_dtype(self, x):
+        if (
+            x.device.type == "cuda"
+            and x.dtype not in (torch.float16, torch.bfloat16)
+        ):
+            return torch.bfloat16
+        return x.dtype
+
+    def _cos_sin(self, position_ids, dtype):
+        if position_ids is None:
+            return None, None
+        max_pos = int(position_ids.max().item()) + 1 if position_ids.numel() > 0 else 0
+        t = torch.arange(max_pos, device=position_ids.device, dtype=self.rotary_inv_freq.dtype)
+        freqs = torch.outer(t, self.rotary_inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        return emb.cos().to(dtype=dtype), emb.sin().to(dtype=dtype)
+
+    def _swa_common_kwargs(self, position_ids, dtype):
+        cos, sin = self._cos_sin(position_ids, dtype)
+        return dict(
+            position_ids=position_ids,
+            cos=cos,
+            sin=sin,
+            q_norm_weight=_maybe_cast(self.q_norm_weight, dtype),
+            k_norm_weight=_maybe_cast(self.k_norm_weight, dtype),
+            norm_eps=self.norm_eps,
         )
-        return self.act(xBC)
+
+    def _linear_kwargs(self, dtype):
+        return dict(
+            q_proj_weight=self.q_proj.weight.to(dtype=dtype),
+            k_proj_weight=self.k_proj.weight.to(dtype=dtype),
+            v_proj_weight=self.v_proj.weight.to(dtype=dtype),
+            out_proj_weight=self.out_proj.weight.to(dtype=dtype),
+            q_proj_bias=_maybe_cast(self.q_proj.bias, dtype),
+            k_proj_bias=_maybe_cast(self.k_proj.bias, dtype),
+            v_proj_bias=_maybe_cast(self.v_proj.bias, dtype),
+            out_proj_bias=_maybe_cast(self.out_proj.bias, dtype),
+        )
 
     def forward(self, u, seqlen=None, seq_idx=None, cu_seqlens=None, inference_params=None):
         """
@@ -208,151 +207,91 @@ class Mamba2SlidingTest(nn.Module, PyTorchModelHubMixin):
         conv_state, ssm_state = None, None
         if inference_params is not None:
             inference_batch = cu_seqlens.shape[0] - 1 if cu_seqlens is not None else batch
-            conv_state, ssm_state = self._get_states_from_cache(inference_params, inference_batch)
+            conv_state, _ = self._get_states_from_cache(inference_params, inference_batch)
             if inference_params.seqlen_offset > 0:
-                out, _, _ = self.step(u, conv_state, ssm_state)
+                out, _, _ = self.step(
+                    u,
+                    conv_state,
+                    None,
+                    position_offset=inference_params.seqlen_offset,
+                )
                 return out
 
-        zxbcdt = self.in_proj(u)
         if seqlen_og is not None:
-            zxbcdt = rearrange(zxbcdt, "(b l) d -> b l d", l=seqlen)
-        A = -torch.exp(self.A_log.float())
-        dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
-        d_mlp = (zxbcdt.shape[-1] - 2 * self.d_ssm - 2 * self.ngroups * self.d_state - self.nheads) // 2
-        z0, x0, z, xBC, dt = torch.split(
-            zxbcdt,
-            [d_mlp, d_mlp, self.d_ssm, self.d_ssm + 2 * self.ngroups * self.d_state, self.nheads],
-            dim=-1,
-        )
+            u = rearrange(u, "(b l) d -> b l d", l=seqlen)
+
+        orig_dtype = u.dtype
+        attn_dtype = self._attention_dtype(u)
+        u_attn = u.to(dtype=attn_dtype)
+        linear_kwargs = self._linear_kwargs(attn_dtype)
+        position_ids = self._position_ids(batch, seqlen, u.device, cu_seqlens=cu_seqlens, seq_idx=seq_idx)
+        common_kwargs = self._swa_common_kwargs(position_ids, attn_dtype)
         if conv_state is not None:
             prefill_sliding_window_cache(
-                xBC,
+                u_attn,
                 conv_state,
-                k_proj_weight=self.k_proj.weight,
-                v_proj_weight=self.v_proj.weight,
-                k_proj_bias=self.k_proj.bias,
-                v_proj_bias=self.v_proj.bias,
+                k_proj_weight=linear_kwargs["k_proj_weight"],
+                v_proj_weight=linear_kwargs["v_proj_weight"],
+                k_proj_bias=linear_kwargs["k_proj_bias"],
+                v_proj_bias=linear_kwargs["v_proj_bias"],
                 num_kv_heads=self.num_kv_heads,
                 cu_seqlens=cu_seqlens,
                 seq_idx=seq_idx,
+                **_filter_supported_kwargs("prefill_sliding_window_cache", common_kwargs),
             )
-        xBC = self._mix_xbc(xBC, seq_idx=seq_idx, cu_seqlens=cu_seqlens)
-        x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
-        y=x
-        # y = mamba_chunk_scan_combined(
-        #     rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
-        #     dt,
-        #     A,
-        #     rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
-        #     rearrange(C, "b l (g n) -> b l g n", g=self.ngroups),
-        #     chunk_size=self.chunk_size,
-        #     D=rearrange(self.D, "(h p) -> h p", p=self.headdim) if self.D_has_hdim else self.D,
-        #     z=rearrange(z, "b l (h p) -> b l h p", p=self.headdim) if not self.rmsnorm else None,
-        #     dt_bias=self.dt_bias,
-        #     dt_softplus=True,
-        #     seq_idx=seq_idx,
-        #     cu_seqlens=cu_seqlens,
-        #     **dt_limit_kwargs,
-        #     return_final_states=ssm_state is not None,
-        #     return_varlen_states=cu_seqlens is not None and inference_params is not None,
-        # )
-        # if ssm_state is not None:
-        #     y, last_state, *rest = y
-        #     if cu_seqlens is None:
-        #         ssm_state.copy_(last_state)
-        #     else:
-        #         varlen_states = rest[0]
-        #         ssm_state.copy_(varlen_states)
-        # y = rearrange(y, "b l h p -> b l (h p)")
-        if self.rmsnorm:
-            y = self.norm(y, z)
-        if d_mlp > 0:
-            y = torch.cat([F.silu(z0) * x0, y], dim=-1)
-        if seqlen_og is not None:
-            y = rearrange(y, "b l d -> (b l) d")
-        out = self.out_proj(y)
-        if self.process_group is not None:
-            reduce_fn = reduce_scatter if self.sequence_parallel else all_reduce
-            out = reduce_fn(out, self.process_group)
-        return out
 
-    def step(self, hidden_states, conv_state, ssm_state):
-        dtype = hidden_states.dtype
-        assert hidden_states.shape[1] == 1, "Only support decoding with 1 token at a time for now"
-        zxbcdt = self.in_proj(hidden_states.squeeze(1))
-        d_mlp = (zxbcdt.shape[-1] - 2 * self.d_ssm - 2 * self.ngroups * self.d_state - self.nheads) // 2
-        z0, x0, z, xBC, dt = torch.split(
-            zxbcdt,
-            [d_mlp, d_mlp, self.d_ssm, self.d_ssm + 2 * self.ngroups * self.d_state, self.nheads],
-            dim=-1,
-        )
-
-        xBC = sliding_window_attention_step(
-            xBC,
-            conv_state,
-            q_proj_weight=self.q_proj.weight,
-            k_proj_weight=self.k_proj.weight,
-            v_proj_weight=self.v_proj.weight,
-            out_proj_weight=self.xbc_out_proj.weight,
-            q_proj_bias=self.q_proj.bias,
-            k_proj_bias=self.k_proj.bias,
-            v_proj_bias=self.v_proj.bias,
-            out_proj_bias=self.xbc_out_proj.bias,
+        y = sliding_window_attention(
+            u_attn,
+            **linear_kwargs,
             num_heads=self.attn_num_heads,
             num_kv_heads=self.num_kv_heads,
+            window_size=self.window_size,
+            seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            dropout_p=self.dropout_p,
+            training=self.training,
+            **_filter_supported_kwargs("sliding_window_attention", common_kwargs),
         )
-        xBC = self.act(xBC).to(dtype=dtype)
+        y = y.to(dtype=orig_dtype)
+        if seqlen_og is not None:
+            y = rearrange(y, "b l d -> (b l) d")
+        if self.process_group is not None:
+            reduce_fn = reduce_scatter if self.sequence_parallel else all_reduce
+            y = reduce_fn(y, self.process_group)
+        return y
 
-        x, B, C = torch.split(xBC, [self.d_ssm, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
-        A = -torch.exp(self.A_log.float())
-
-        if selective_state_update is None:
-            # assert self.ngroups == 1, "Only support ngroups=1 for this inference code path"
-            # dt = F.softplus(dt + self.dt_bias.to(dtype=dt.dtype))
-            # dA = torch.exp(dt * A)
-            # x = rearrange(x, "b (h p) -> b h p", p=self.headdim)
-            # dBx = torch.einsum("bh,bn,bhp->bhpn", dt, B, x)
-            # ssm_state.copy_(ssm_state * rearrange(dA, "b h -> b h 1 1") + dBx)
-            # y = torch.einsum("bhpn,bn->bhp", ssm_state.to(dtype), C)
-            # y = y + rearrange(self.D.to(dtype), "h -> h 1") * x
-            # y = rearrange(y, "b h p -> b (h p)")
-            y=x
-            if not self.rmsnorm:
-                y = y * self.act(z)
-        else:
-            # A = repeat(A, "h -> h p n", p=self.headdim, n=self.d_state).to(dtype=torch.float32)
-            # dt = repeat(dt, "b h -> b h p", p=self.headdim)
-            # dt_bias = repeat(self.dt_bias, "h -> h p", p=self.headdim)
-            # D = repeat(self.D, "h -> h p", p=self.headdim)
-            # B = rearrange(B, "b (g n) -> b g n", g=self.ngroups)
-            # C = rearrange(C, "b (g n) -> b g n", g=self.ngroups)
-            # x_reshaped = rearrange(x, "b (h p) -> b h p", p=self.headdim)
-            # if not self.rmsnorm:
-            #     z = rearrange(z, "b (h p) -> b h p", p=self.headdim)
-            # y = selective_state_update(
-            #     ssm_state,
-            #     x_reshaped,
-            #     dt,
-            #     A,
-            #     B,
-            #     C,
-            #     D,
-            #     z=z if not self.rmsnorm else None,
-            #     dt_bias=dt_bias,
-            #     dt_softplus=True,
-            # )
-            # y = rearrange(y, "b h p -> b (h p)")
-            y=x
-        if self.rmsnorm:
-            y = self.norm(y, z)
-        if d_mlp > 0:
-            y = torch.cat([F.silu(z0) * x0, y], dim=-1)
-        out = self.out_proj(y)
-        return out.unsqueeze(1), conv_state, ssm_state
+    def step(self, hidden_states, conv_state, ssm_state=None, position_offset=0):
+        assert hidden_states.shape[1] == 1, "Only support decoding with 1 token at a time for now"
+        x = hidden_states.squeeze(1)
+        orig_dtype = x.dtype
+        attn_dtype = self._attention_dtype(x)
+        x_attn = x.to(dtype=attn_dtype)
+        linear_kwargs = self._linear_kwargs(attn_dtype)
+        position_ids = self._position_ids(
+            x.shape[0],
+            1,
+            x.device,
+            offset=position_offset,
+        )
+        common_kwargs = self._swa_common_kwargs(position_ids, attn_dtype)
+        y = sliding_window_attention_step(
+            x_attn,
+            conv_state,
+            **linear_kwargs,
+            num_heads=self.attn_num_heads,
+            num_kv_heads=self.num_kv_heads,
+            **_filter_supported_kwargs("sliding_window_attention_step", common_kwargs),
+        )
+        return y.to(dtype=orig_dtype).unsqueeze(1), conv_state, ssm_state
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         device = self.out_proj.weight.device
         conv_dtype = self.q_proj.weight.dtype if dtype is None else dtype
+        if (
+            device.type == "cuda"
+            and conv_dtype not in (torch.float16, torch.bfloat16)
+        ):
+            conv_dtype = torch.bfloat16
         conv_state = {
             "k_cache": torch.zeros(
                 batch_size,
@@ -372,21 +311,16 @@ class Mamba2SlidingTest(nn.Module, PyTorchModelHubMixin):
             ),
             "filled": torch.zeros(batch_size, device=device, dtype=torch.int32),
         }
-        ssm_dtype = self.in_proj.weight.dtype if dtype is None else dtype
-        ssm_state = torch.zeros(
-            batch_size, self.nheads, self.headdim, self.d_state, device=device, dtype=ssm_dtype
-        )
-        return conv_state, ssm_state
+        return conv_state, None
 
     def _get_states_from_cache(self, inference_params, batch_size, initialize_states=False):
         assert self.layer_idx is not None
         if self.layer_idx not in inference_params.key_value_memory_dict:
             inference_params.key_value_memory_dict[self.layer_idx] = self.allocate_inference_cache(batch_size, 0)
         else:
-            conv_state, ssm_state = inference_params.key_value_memory_dict[self.layer_idx]
+            conv_state, _ = inference_params.key_value_memory_dict[self.layer_idx]
             if initialize_states:
                 conv_state["k_cache"].zero_()
                 conv_state["v_cache"].zero_()
                 conv_state["filled"].zero_()
-                ssm_state.zero_()
         return inference_params.key_value_memory_dict[self.layer_idx]
