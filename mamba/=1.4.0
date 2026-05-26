@@ -1,0 +1,22 @@
+Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple
+Collecting causal-conv1d
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/63/15/ec51d77a2df03ee93410f8ee97fceeb7181da213813c51243e9dd6d7e144/causal_conv1d-1.6.1.tar.gz (29 kB)
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Requirement already satisfied: torch in /data/yinghaoliu/conda/conda_envs/blagpt/lib/python3.10/site-packages (from causal-conv1d) (2.5.0)
+Requirement already satisfied: packaging in /data/yinghaoliu/conda/conda_envs/blagpt/lib/python3.10/site-packages (from causal-conv1d) (26.0)
+Requirement already satisfied: ninja in /data/yinghaoliu/conda/conda_envs/blagpt/lib/python3.10/site-packages (from causal-conv1d) (1.13.0)
+Requirement already satisfied: filelock in /data/yinghaoliu/conda/conda_envs/blagpt/lib/python3.10/site-packages (from torch->causal-conv1d) (3.29.0)
+Requirement already satisfied: typing-extensions>=4.8.0 in /data/yinghaoliu/conda/conda_envs/blagpt/lib/python3.10/site-packages (from torch->causal-conv1d) (4.15.0)
+Requirement already satisfied: networkx in /data/yinghaoliu/conda/conda_envs/blagpt/lib/python3.10/site-packages (from torch->causal-conv1d) (3.4.2)
+Requirement already satisfied: jinja2 in /data/yinghaoliu/conda/conda_envs/blagpt/lib/python3.10/site-packages (from torch->causal-conv1d) (3.1.6)
+Requirement already satisfied: fsspec in /data/yinghaoliu/conda/conda_envs/blagpt/lib/python3.10/site-packages (from torch->causal-conv1d) (2026.3.0)
+Collecting sympy==1.13.1 (from torch->causal-conv1d)
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/b2/fe/81695a1aa331a842b582453b605175f419fe8540355886031328089d840a/sympy-1.13.1-py3-none-any.whl (6.2 MB)
+Collecting mpmath<1.4,>=1.1.0 (from sympy==1.13.1->torch->causal-conv1d)
+  Using cached https://pypi.tuna.tsinghua.edu.cn/packages/43/e3/7d92a15f894aa0c9c4b49b8ee9ac9850d6e63b03c9c32c0367a13ae62209/mpmath-1.3.0-py3-none-any.whl (536 kB)
+Requirement already satisfied: MarkupSafe>=2.0 in /data/yinghaoliu/conda/conda_envs/blagpt/lib/python3.10/site-packages (from jinja2->torch->causal-conv1d) (3.0.3)
+Building wheels for collected packages: causal-conv1d
+  Building wheel for causal-conv1d (pyproject.toml): started
+  Building wheel for causal-conv1d (pyproject.toml): finished with status 'error'
+Failed to build causal-conv1d

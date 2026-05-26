@@ -29,6 +29,9 @@ from torch.nn import functional as F
 
 from mamba_ssm import Mamba2
 from mamba_ssm.modules.mamba2_new import Mamba2 as Mamba2New
+from mamba_ssm.modules.mamba2_new_v2 import Mamba2 as Mamba2NewV2
+from mamba_ssm.modules.mamba2_new_v3 import Mamba2 as Mamba2NewV3
+from mamba_ssm.modules.mamba2_new_v4 import Mamba2 as Mamba2NewV4
 from mamba_ssm.modules.mamba2_sliding import Mamba2Sliding
 from mamba_ssm.modules.mamba2_sliding_test import Mamba2SlidingTest
 
@@ -334,6 +337,12 @@ def get_attention(config, depth=None):
         return Mamba2Wrapper(config, depth)
     elif attn_type == "mamba2_new":
         return Mamba2NewWrapper(config, depth)
+    elif attn_type == "mamba2_new_v2":
+        return Mamba2NewV2Wrapper(config, depth)
+    elif attn_type == "mamba2_new_v3":
+        return Mamba2NewV3Wrapper(config, depth)
+    elif attn_type == "mamba2_new_v4":
+        return Mamba2NewV4Wrapper(config, depth)
     elif attn_type == "mamba2_sliding":
         return Mamba2SlidingWrapper(config, depth)
     elif attn_type == "mamba2_sliding_test":
@@ -508,6 +517,150 @@ class Mamba2NewWrapper(nn.Module):
             raise ImportError("Mamba2New is unavailable. Ensure mamba_ssm.modules.mamba2_new is importable.")
         headdim = config.mamba_headdim or (config.n_embd // config.n_head)
         self.mamba = Mamba2New(
+            d_model=config.n_embd,
+            d_state=config.mamba_d_state,
+            d_conv=config.mamba_d_conv,
+            window_size=config.mamba_window_size,
+            use_flash_swa=True,
+            expand=config.mamba_expand,
+            headdim=headdim,
+            d_ssm=config.mamba_d_ssm,
+            ngroups=config.mamba_ngroups,
+            D_has_hdim=config.mamba_D_has_hdim,
+            rmsnorm=(config.norm_layer == "rmsnorm"),
+            norm_before_gate=config.mamba_norm_before_gate,
+            dt_min=config.mamba_dt_min,
+            dt_max=config.mamba_dt_max,
+            dt_init_floor=config.mamba_dt_init_floor,
+            dt_limit=config.mamba_dt_limit,
+            bias=config.bias,
+            conv_bias=config.mamba_conv_bias,
+            chunk_size=config.mamba_chunk_size,
+            use_mem_eff_path=config.mamba_use_mem_eff_path,
+            layer_idx=depth,
+        )
+
+    @torch.compiler.disable
+    def forward(
+        self,
+        x,
+        seqlen=None,
+        seq_idx=None,
+        cu_seqlens=None,
+        inference_params=None,
+    ):
+        return self.mamba(
+            x,
+            seqlen=seqlen,
+            seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            inference_params=inference_params,
+        )
+
+
+class Mamba2NewV2Wrapper(nn.Module):
+    def __init__(self, config, depth=None):
+        super().__init__()
+        if Mamba2NewV2 is None:
+            raise ImportError("Mamba2NewV2 is unavailable. Ensure mamba_ssm.modules.mamba2_new_v2 is importable.")
+        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
+        self.mamba = Mamba2NewV2(
+            d_model=config.n_embd,
+            d_state=config.mamba_d_state,
+            d_conv=config.mamba_d_conv,
+            window_size=config.mamba_window_size,
+            use_flash_swa=True,
+            expand=config.mamba_expand,
+            headdim=headdim,
+            d_ssm=config.mamba_d_ssm,
+            ngroups=config.mamba_ngroups,
+            D_has_hdim=config.mamba_D_has_hdim,
+            rmsnorm=(config.norm_layer == "rmsnorm"),
+            norm_before_gate=config.mamba_norm_before_gate,
+            dt_min=config.mamba_dt_min,
+            dt_max=config.mamba_dt_max,
+            dt_init_floor=config.mamba_dt_init_floor,
+            dt_limit=config.mamba_dt_limit,
+            bias=config.bias,
+            conv_bias=config.mamba_conv_bias,
+            chunk_size=config.mamba_chunk_size,
+            use_mem_eff_path=config.mamba_use_mem_eff_path,
+            layer_idx=depth,
+        )
+
+    @torch.compiler.disable
+    def forward(
+        self,
+        x,
+        seqlen=None,
+        seq_idx=None,
+        cu_seqlens=None,
+        inference_params=None,
+    ):
+        return self.mamba(
+            x,
+            seqlen=seqlen,
+            seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            inference_params=inference_params,
+        )
+
+
+class Mamba2NewV3Wrapper(nn.Module):
+    def __init__(self, config, depth=None):
+        super().__init__()
+        if Mamba2NewV3 is None:
+            raise ImportError("Mamba2NewV3 is unavailable. Ensure mamba_ssm.modules.mamba2_new_v3 is importable.")
+        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
+        self.mamba = Mamba2NewV3(
+            d_model=config.n_embd,
+            d_state=config.mamba_d_state,
+            d_conv=config.mamba_d_conv,
+            window_size=config.mamba_window_size,
+            use_flash_swa=True,
+            expand=config.mamba_expand,
+            headdim=headdim,
+            d_ssm=config.mamba_d_ssm,
+            ngroups=config.mamba_ngroups,
+            D_has_hdim=config.mamba_D_has_hdim,
+            rmsnorm=(config.norm_layer == "rmsnorm"),
+            norm_before_gate=config.mamba_norm_before_gate,
+            dt_min=config.mamba_dt_min,
+            dt_max=config.mamba_dt_max,
+            dt_init_floor=config.mamba_dt_init_floor,
+            dt_limit=config.mamba_dt_limit,
+            bias=config.bias,
+            conv_bias=config.mamba_conv_bias,
+            chunk_size=config.mamba_chunk_size,
+            use_mem_eff_path=config.mamba_use_mem_eff_path,
+            layer_idx=depth,
+        )
+
+    @torch.compiler.disable
+    def forward(
+        self,
+        x,
+        seqlen=None,
+        seq_idx=None,
+        cu_seqlens=None,
+        inference_params=None,
+    ):
+        return self.mamba(
+            x,
+            seqlen=seqlen,
+            seq_idx=seq_idx,
+            cu_seqlens=cu_seqlens,
+            inference_params=inference_params,
+        )
+
+
+class Mamba2NewV4Wrapper(nn.Module):
+    def __init__(self, config, depth=None):
+        super().__init__()
+        if Mamba2NewV4 is None:
+            raise ImportError("Mamba2NewV4 is unavailable. Ensure mamba_ssm.modules.mamba2_new_v4 is importable.")
+        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
+        self.mamba = Mamba2NewV4(
             d_model=config.n_embd,
             d_state=config.mamba_d_state,
             d_conv=config.mamba_d_conv,

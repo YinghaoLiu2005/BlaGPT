@@ -1,5 +1,5 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
-
+# In this file we change the conv1d into a sliding-window attention
 import math
 
 import torch

@@ -225,6 +225,9 @@ if __name__ == "__main__":
             "DiffAttnv2",
             "mamba2",
             "mamba2_new",
+            "mamba2_new_v2",
+            "mamba2_new_v3",
+            "mamba2_new_v4",
             "mamba2_sliding",
             "mamba2_sliding_test",
         }
@@ -260,10 +263,15 @@ if __name__ == "__main__":
     # calculate the steps of gradient accumulation required to attain the desired global batch size.
     assert args.batch_size % (B * ddp_world_size) == 0
     train_accumulation_steps = args.batch_size // (B * ddp_world_size)
+    run_summary_lines = []
     if master_process:
-        print(f"Accumulation steps: {train_accumulation_steps}")
-        print(f"Attention: {model_config.attention}")
-        print(f"Mamba window size: {model_config.mamba_window_size}")
+        run_summary_lines = [
+            f"Accumulation steps: {train_accumulation_steps}",
+            f"Attention: {model_config.attention}",
+            f"Mamba window size: {model_config.mamba_window_size}",
+        ]
+        for line in run_summary_lines:
+            print(line)
 
     # load tokens
     train_loader = DistributedDataLoader(args.input_bin, B, T, ddp_rank, ddp_world_size)
@@ -306,9 +314,14 @@ if __name__ == "__main__":
     )
 
     if master_process:
-        print(f"Model size: {model_size:.2f} MB")
-        print(f"Number of parameters: {num_parameters}")
-        print(f"Number of trainable parameters: {num_trainable_parameters}")
+        model_summary_lines = [
+            f"Model size: {model_size:.2f} MB",
+            f"Number of parameters: {num_parameters}",
+            f"Number of trainable parameters: {num_trainable_parameters}",
+        ]
+        run_summary_lines.extend(model_summary_lines)
+        for line in model_summary_lines:
+            print(line)
 
     # here we wrap model into DDP container
     model = DDP(
@@ -380,6 +393,9 @@ if __name__ == "__main__":
             text=True,
         )
         print(f"{result.stdout}")
+        print("=" * 100)
+        for line in run_summary_lines:
+            print(line)
         print("=" * 100)
         for line in dataset_summary_lines:
             print(line)
