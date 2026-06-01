@@ -53,7 +53,7 @@ def write_datafile(filename, toks):
 # ------------------------------------------
 
 parser = argparse.ArgumentParser(description="FineWeb dataset preprocessing")
-parser.add_argument("-v", "--version", type=str, default="10B", help="Which version of fineweb to use 10B|100B")
+parser.add_argument("-v", "--version", type=str, default="100B", help="Which version of fineweb to use 10B|100B")
 parser.add_argument("-s", "--shard_size", type=int, default=10**8, help="Size of each shard in tokens")
 args = parser.parse_args()
 

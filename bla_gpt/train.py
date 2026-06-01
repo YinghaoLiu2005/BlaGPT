@@ -9,6 +9,7 @@ from utils import get_model
 with open(sys.argv[0]) as f:
     code = f.read()  # read the code of this file ASAP, for logging
 import glob
+import math
 import time
 from dataclasses import dataclass, field
 
@@ -152,6 +153,7 @@ class Hyperparameters(Coqpit):
     device_batch_size: int = 8  # batch size, in sequences, per device, grad_accum_steps = batch_size // num_devices /// device_batch_size
     sequence_length: int = 1024  # sequence length, in tokens
     num_iterations: int = 25000  # number of iterations to run
+    num_epochs: float = 0.0  # if > 0, overrides num_iterations to run this many dataset passes
 
     # optimizer
     optimizer_name: str = "Adam"
@@ -194,6 +196,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume",type=str, default=None, help="path to checkpoint to resume from")
     parser.add_argument("--attention", type=str, default=None, help="Override GPTConfig.attention")
     parser.add_argument("--mamba_window_size",type=int,default=None,help="Override GPTConfig.mamba_window_size for Mamba sliding-window layers",)
+    parser.add_argument("--num_epochs", type=float, default=None, help="Override num_iterations by running this many full training dataset passes")
     cli_args = parser.parse_args()
 
     args = Hyperparameters()
@@ -228,6 +231,7 @@ if __name__ == "__main__":
             "mamba2_new_v2",
             "mamba2_new_v3",
             "mamba2_new_v4",
+            "mamba2_new_v5",
             "mamba2_sliding",
             "mamba2_sliding_test",
         }
@@ -241,6 +245,11 @@ if __name__ == "__main__":
         if cli_args.mamba_window_size <= 0:
             raise ValueError("--mamba_window_size must be a positive integer")
         model_config.mamba_window_size = cli_args.mamba_window_size
+
+    if cli_args.num_epochs is not None:
+        if cli_args.num_epochs < 0:
+            raise ValueError("--num_epochs must be non-negative")
+        args.num_epochs = cli_args.num_epochs
 
     # set up DDP (distributed data parallel). torchrun sets this env variable
     assert torch.cuda.is_available()
@@ -278,6 +287,11 @@ if __name__ == "__main__":
     val_loader = DistributedDataLoader(
         args.input_val_bin, B, T, ddp_rank, ddp_world_size
     )
+    if args.num_epochs > 0:
+        args.num_iterations = math.ceil(
+            args.num_epochs * train_loader.ntok_total
+            / (args.batch_size * args.sequence_length)
+        )
     dataset_summary_lines = []
     if master_process:
         tokens_per_train_step = args.batch_size * args.sequence_length
@@ -289,6 +303,7 @@ if __name__ == "__main__":
             f"Training dataset size: {_format_token_count(train_loader.ntok_total)} across {len(train_loader.files)} files",
             f"Validation dataset size: {_format_token_count(val_loader.ntok_total)} across {len(val_loader.files)} files",
             f"Tokens per training step: {_format_token_count(tokens_per_train_step)}",
+            f"Requested dataset passes: {args.num_epochs:g}" if args.num_epochs > 0 else "Requested dataset passes: disabled (using num_iterations)",
             f"Tokens actually used by this run: {_format_token_count(total_train_tokens)} over {args.num_iterations} steps ({dataset_epochs:.2f} dataset passes)",
         ]
         for line in dataset_summary_lines:

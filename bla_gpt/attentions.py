@@ -143,11 +143,15 @@ class Attention(nn.Module):
             rope_variant = getattr(config, 'rope_variant', 'standard')
 
             if rope_variant == 'standard':
-                self.rotary = Rotary(self.head_dim, base=config.rope_theta)
+                self.rotary = Rotary(
+                    self.head_dim, base=config.rope_theta, seq_len=config.block_size
+                )
                 self.apply_rope_fn = apply_rotary_emb
             elif rope_variant == 'simplified':
                 # SimplifiedRotary takes head_dim/2 (will be doubled by concat)
-                self.rotary = SimplifiedRotary(self.head_dim // 2, base=config.rope_theta)
+                self.rotary = SimplifiedRotary(
+                    self.head_dim // 2, base=config.rope_theta, seq_len=config.block_size
+                )
                 self.apply_rope_fn = apply_simplified_rotary_emb
             else:
                 raise ValueError(f"Unknown rope_variant: {rope_variant}")

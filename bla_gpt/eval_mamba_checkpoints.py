@@ -27,7 +27,10 @@ DEFAULT_CKPTS = {
     #"mamba_new_v3": "logs/mamba2_new_v3_w512_1/state_step025000.pt",
     #"mamba_new_v4": "logs/mamba2_new_v4_w512_0/state_step025000.pt",
     #"mamba_new_v1_512": "logs/mamba2_new_v1_w512_1/state_step025000.pt",
-    "mamba_new_v2_4": "logs/mamba2_new_v2_w4_0/state_step025000.pt",
+    #"mamba_new_v2_4": "logs/mamba2_new_v2_w4_0/state_step025000.pt",
+    #"regular": "logs/regular_1/state_step025000.pt",
+    "mamba_new_v3": "logs/mamba2_new_v3_w512_0/state_step025000.pt",
+    "mamba_new_v4": "logs/mamba2_new_v4_w512_1/state_step025000.pt",
 }
 
 
