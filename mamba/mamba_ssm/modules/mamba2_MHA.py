@@ -1,12 +1,12 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
-# In this file we change the position of the sliding-window attention to be before the SSM
+# MHA sliding-window attention front-end for Mamba2.
 import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from einops import rearrange, repeat
+from einops import rearrange
 
 try:
     from flash_attn import flash_attn_func
@@ -31,6 +31,8 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         d_conv=4,
         window_size=None,
         use_flash_swa=True,
+        rope_theta=500000.0,
+        dropout_p=0.0,
         conv_init=None,
         expand=2,
         headdim=64,
@@ -62,6 +64,8 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.d_conv = d_conv
         self.window_size = d_conv if window_size is None else window_size
         self.use_flash_swa = use_flash_swa
+        self.rope_theta = rope_theta
+        self.dropout_p = dropout_p
         self.conv_init = conv_init
         self.expand = expand
         self.process_group = process_group
@@ -95,11 +99,18 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                                                 **factory_kwargs)
 
         assert self.d_model % self.headdim == 0, "Flash SWA input dim must be divisible by headdim"
+        assert self.headdim % 2 == 0, "RoPE requires an even attention head dimension"
         self.attn_nheads = self.d_model // self.headdim
         self.input_q_proj = nn.Linear(self.d_model, self.d_model, bias=conv_bias, **factory_kwargs)
         self.input_k_proj = nn.Linear(self.d_model, self.d_model, bias=conv_bias, **factory_kwargs)
         self.input_v_proj = nn.Linear(self.d_model, self.d_model, bias=conv_bias, **factory_kwargs)
         self.input_out_proj = nn.Linear(self.d_model, self.d_model, bias=conv_bias, **factory_kwargs)
+        self.input_norm = RMSNormGated(self.d_model, eps=1e-5, norm_before_gate=True, **factory_kwargs)
+        rotary_inv_freq = 1.0 / (
+            self.rope_theta
+            ** (torch.arange(0, self.headdim, 2, device=device, dtype=torch.float32) / self.headdim)
+        )
+        self.register_buffer("rotary_inv_freq", rotary_inv_freq, persistent=False)
 
         self.act = nn.SiLU()
 
@@ -138,6 +149,23 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                                               process_group=self.process_group, sequence_parallel=self.sequence_parallel,
                                               **factory_kwargs)
 
+    def _rotary_cos_sin(self, seqlen, device, dtype):
+        position_ids = torch.arange(seqlen, device=device, dtype=self.rotary_inv_freq.dtype)
+        freqs = torch.outer(position_ids, self.rotary_inv_freq)
+        return (
+            freqs.cos()[None, :, None, :].to(dtype=dtype),
+            freqs.sin()[None, :, None, :].to(dtype=dtype),
+        )
+
+    def _apply_rotary(self, x, cos, sin):
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            half = x.shape[-1] // 2
+            x1 = x[..., :half].float()
+            x2 = x[..., half:].float()
+            y1 = x1 * cos + x2 * sin
+            y2 = x1 * (-sin) + x2 * cos
+        return torch.cat([y1, y2], dim=-1).type_as(x)
+
     def forward(self, u, seqlen=None, seq_idx=None, cu_seqlens=None, inference_params=None):
         """
         u: (batch, seqlen, hidden_dim) if seqlen=None.
@@ -154,7 +182,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
             batch = batch_seqlen // seqlen
 
         if inference_params is not None:
-            raise NotImplementedError("Mamba2 v2 input sliding-window attention only supports full-sequence training for now.")
+            raise NotImplementedError("Mamba2 MHA input sliding-window attention only supports full-sequence training for now.")
 
         if seqlen_og is not None:
             u = rearrange(u, "(b l) d -> b l d", l=seqlen)
@@ -163,17 +191,23 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
                 raise RuntimeError("use_flash_swa=True requires flash-attn to be installed.")
             if u.device.type != "cuda":
                 raise RuntimeError("flash-attn sliding-window attention requires CUDA tensors.")
-            q = rearrange(self.input_q_proj(u), "b l (h p) -> b l h p", h=self.attn_nheads)
-            k = rearrange(self.input_k_proj(u), "b l (h p) -> b l h p", h=self.attn_nheads)
-            v = rearrange(self.input_v_proj(u), "b l (h p) -> b l h p", h=self.attn_nheads)
+            attn_input = self.input_norm(u)
+            q = rearrange(self.input_q_proj(attn_input), "b l (h p) -> b l h p", h=self.attn_nheads)
+            k = rearrange(self.input_k_proj(attn_input), "b l (h p) -> b l h p", h=self.attn_nheads)
+            v = rearrange(self.input_v_proj(attn_input), "b l (h p) -> b l h p", h=self.attn_nheads)
             if q.dtype not in (torch.float16, torch.bfloat16):
                 q, k, v = q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16)
-            u = flash_attn_func(
+            cos, sin = self._rotary_cos_sin(seqlen, u.device, q.dtype)
+            q = self._apply_rotary(q, cos, sin)
+            k = self._apply_rotary(k, cos, sin)
+            attn_out = flash_attn_func(
                 q, k, v,
+                dropout_p=self.dropout_p if self.training else 0.0,
                 causal=True,
                 window_size=(self.window_size - 1, 0),
             )
-            u = self.input_out_proj(rearrange(u, "b l h p -> b l (h p)"))
+            attn_out = rearrange(attn_out, "b l h p -> b l (h p)").to(dtype=u.dtype)
+            u = u + self.input_out_proj(attn_out)
 
         zxbcdt = self.in_proj(u)  # (B, L, d_in_proj)
         # If the model is loaded in fp16, without the .float() here, A might be -inf
@@ -216,10 +250,10 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         return out
 
     def step(self, hidden_states, conv_state, ssm_state):
-        raise NotImplementedError("Mamba2 v2 input sliding-window attention does not support step decoding yet.")
+        raise NotImplementedError("Mamba2 MHA input sliding-window attention does not support step decoding yet.")
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        raise NotImplementedError("Mamba2 v2 input sliding-window attention does not support inference cache yet.")
+        raise NotImplementedError("Mamba2 MHA input sliding-window attention does not support inference cache yet.")
 
     def _get_states_from_cache(self, inference_params, batch_size, initialize_states=False):
-        raise NotImplementedError("Mamba2 v2 input sliding-window attention does not support inference cache yet.")
+        raise NotImplementedError("Mamba2 MHA input sliding-window attention does not support inference cache yet.")

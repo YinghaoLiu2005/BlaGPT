@@ -28,13 +28,8 @@ from norms import DyTNorm, LayerNorm, RMSNorm
 from torch.nn import functional as F
 
 from mamba_ssm import Mamba2
-from mamba_ssm.modules.mamba2_new import Mamba2 as Mamba2New
-from mamba_ssm.modules.mamba2_new_v2 import Mamba2 as Mamba2NewV2
-from mamba_ssm.modules.mamba2_new_v3 import Mamba2 as Mamba2NewV3
-from mamba_ssm.modules.mamba2_new_v4 import Mamba2 as Mamba2NewV4
-from mamba_ssm.modules.mamba2_new_v5 import Mamba2 as Mamba2NewV5
-from mamba_ssm.modules.mamba2_sliding import Mamba2Sliding
-from mamba_ssm.modules.mamba2_sliding_test import Mamba2SlidingTest
+from mamba_ssm.modules.mamba2_GQA import Mamba2 as Mamba2GQA
+from mamba_ssm.modules.mamba2_MHA import Mamba2 as Mamba2MHA
 
 
 #
@@ -49,8 +44,8 @@ class GPTConfig(Coqpit):
     block_size: int = 1024
     vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
+    n_head: int = 13
+    n_embd: int = 832
     n_latentd: int = 0  # 192  # only for MultiHeadLatentAttention
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
@@ -337,20 +332,10 @@ def get_attention(config, depth=None):
         return MultiheadDiffAttnv2(config)
     elif attn_type == "mamba2":
         return Mamba2Wrapper(config, depth)
-    elif attn_type == "mamba2_new":
-        return Mamba2NewWrapper(config, depth)
-    elif attn_type == "mamba2_new_v2":
-        return Mamba2NewV2Wrapper(config, depth)
-    elif attn_type == "mamba2_new_v3":
-        return Mamba2NewV3Wrapper(config, depth)
-    elif attn_type == "mamba2_new_v4":
-        return Mamba2NewV4Wrapper(config, depth)
-    elif attn_type == "mamba2_new_v5":
-        return Mamba2NewV5Wrapper(config, depth)
-    elif attn_type == "mamba2_sliding":
-        return Mamba2SlidingWrapper(config, depth)
-    elif attn_type == "mamba2_sliding_test":
-        return Mamba2SlidingTestWrapper(config, depth)
+    elif attn_type == "mamba2_GQA":
+        return Mamba2GQAWrapper(config, depth)
+    elif attn_type == "mamba2_MHA":
+        return Mamba2MHAWrapper(config, depth)
     raise ValueError(f"Unrecognized attention type {attn_type}")
 
 
@@ -466,157 +451,13 @@ class Mamba2Wrapper(nn.Module):
         )
 
 
-class Mamba2SlidingWrapper(nn.Module):
+class Mamba2GQAWrapper(nn.Module):
     def __init__(self, config, depth=None):
         super().__init__()
-        if Mamba2Sliding is None:
-            raise ImportError("Mamba2Sliding is unavailable. Ensure mamba_ssm is importable in this environment.")
+        if Mamba2GQA is None:
+            raise ImportError("Mamba2GQA is unavailable. Ensure mamba_ssm.modules.mamba2_GQA is importable.")
         headdim = config.mamba_headdim or (config.n_embd // config.n_head)
-        self.mamba = Mamba2Sliding(
-            d_model=config.n_embd,
-            d_state=config.mamba_d_state,
-            d_conv=config.mamba_d_conv,
-            expand=config.mamba_expand,
-            headdim=headdim,
-            d_ssm=config.mamba_d_ssm,
-            ngroups=config.mamba_ngroups,
-            D_has_hdim=config.mamba_D_has_hdim,
-            rmsnorm=(config.norm_layer == "rmsnorm"),
-            norm_before_gate=config.mamba_norm_before_gate,
-            dt_min=config.mamba_dt_min,
-            dt_max=config.mamba_dt_max,
-            dt_init_floor=config.mamba_dt_init_floor,
-            dt_limit=config.mamba_dt_limit,
-            bias=config.bias,
-            conv_bias=config.mamba_conv_bias,
-            chunk_size=config.mamba_chunk_size,
-            use_mem_eff_path=config.mamba_use_mem_eff_path,
-            layer_idx=depth,
-            window_size=config.mamba_window_size,
-            num_kv_heads=config.mamba_num_kv_heads,
-        )
-
-    @torch.compiler.disable
-    def forward(
-        self,
-        x,
-        seqlen=None,
-        seq_idx=None,
-        cu_seqlens=None,
-        inference_params=None,
-    ):
-        return self.mamba(
-            x,
-            seqlen=seqlen,
-            seq_idx=seq_idx,
-            cu_seqlens=cu_seqlens,
-            inference_params=inference_params,
-        )
-
-
-class Mamba2NewWrapper(nn.Module):
-    def __init__(self, config, depth=None):
-        super().__init__()
-        if Mamba2New is None:
-            raise ImportError("Mamba2New is unavailable. Ensure mamba_ssm.modules.mamba2_new is importable.")
-        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
-        self.mamba = Mamba2New(
-            d_model=config.n_embd,
-            d_state=config.mamba_d_state,
-            d_conv=config.mamba_d_conv,
-            window_size=config.mamba_window_size,
-            use_flash_swa=True,
-            expand=config.mamba_expand,
-            headdim=headdim,
-            d_ssm=config.mamba_d_ssm,
-            ngroups=config.mamba_ngroups,
-            D_has_hdim=config.mamba_D_has_hdim,
-            rmsnorm=(config.norm_layer == "rmsnorm"),
-            norm_before_gate=config.mamba_norm_before_gate,
-            dt_min=config.mamba_dt_min,
-            dt_max=config.mamba_dt_max,
-            dt_init_floor=config.mamba_dt_init_floor,
-            dt_limit=config.mamba_dt_limit,
-            bias=config.bias,
-            conv_bias=config.mamba_conv_bias,
-            chunk_size=config.mamba_chunk_size,
-            use_mem_eff_path=config.mamba_use_mem_eff_path,
-            layer_idx=depth,
-        )
-
-    @torch.compiler.disable
-    def forward(
-        self,
-        x,
-        seqlen=None,
-        seq_idx=None,
-        cu_seqlens=None,
-        inference_params=None,
-    ):
-        return self.mamba(
-            x,
-            seqlen=seqlen,
-            seq_idx=seq_idx,
-            cu_seqlens=cu_seqlens,
-            inference_params=inference_params,
-        )
-
-
-class Mamba2NewV2Wrapper(nn.Module):
-    def __init__(self, config, depth=None):
-        super().__init__()
-        if Mamba2NewV2 is None:
-            raise ImportError("Mamba2NewV2 is unavailable. Ensure mamba_ssm.modules.mamba2_new_v2 is importable.")
-        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
-        self.mamba = Mamba2NewV2(
-            d_model=config.n_embd,
-            d_state=config.mamba_d_state,
-            d_conv=config.mamba_d_conv,
-            window_size=config.mamba_window_size,
-            use_flash_swa=True,
-            expand=config.mamba_expand,
-            headdim=headdim,
-            d_ssm=config.mamba_d_ssm,
-            ngroups=config.mamba_ngroups,
-            D_has_hdim=config.mamba_D_has_hdim,
-            rmsnorm=(config.norm_layer == "rmsnorm"),
-            norm_before_gate=config.mamba_norm_before_gate,
-            dt_min=config.mamba_dt_min,
-            dt_max=config.mamba_dt_max,
-            dt_init_floor=config.mamba_dt_init_floor,
-            dt_limit=config.mamba_dt_limit,
-            bias=config.bias,
-            conv_bias=config.mamba_conv_bias,
-            chunk_size=config.mamba_chunk_size,
-            use_mem_eff_path=config.mamba_use_mem_eff_path,
-            layer_idx=depth,
-        )
-
-    @torch.compiler.disable
-    def forward(
-        self,
-        x,
-        seqlen=None,
-        seq_idx=None,
-        cu_seqlens=None,
-        inference_params=None,
-    ):
-        return self.mamba(
-            x,
-            seqlen=seqlen,
-            seq_idx=seq_idx,
-            cu_seqlens=cu_seqlens,
-            inference_params=inference_params,
-        )
-
-
-class Mamba2NewV3Wrapper(nn.Module):
-    def __init__(self, config, depth=None):
-        super().__init__()
-        if Mamba2NewV3 is None:
-            raise ImportError("Mamba2NewV3 is unavailable. Ensure mamba_ssm.modules.mamba2_new_v3 is importable.")
-        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
-        self.mamba = Mamba2NewV3(
+        self.mamba = Mamba2GQA(
             d_model=config.n_embd,
             d_state=config.mamba_d_state,
             d_conv=config.mamba_d_conv,
@@ -660,13 +501,13 @@ class Mamba2NewV3Wrapper(nn.Module):
         )
 
 
-class Mamba2NewV4Wrapper(nn.Module):
+class Mamba2MHAWrapper(nn.Module):
     def __init__(self, config, depth=None):
         super().__init__()
-        if Mamba2NewV4 is None:
-            raise ImportError("Mamba2NewV4 is unavailable. Ensure mamba_ssm.modules.mamba2_new_v4 is importable.")
+        if Mamba2MHA is None:
+            raise ImportError("Mamba2MHA is unavailable. Ensure mamba_ssm.modules.mamba2_MHA is importable.")
         headdim = config.mamba_headdim or (config.n_embd // config.n_head)
-        self.mamba = Mamba2NewV4(
+        self.mamba = Mamba2MHA(
             d_model=config.n_embd,
             d_state=config.mamba_d_state,
             d_conv=config.mamba_d_conv,
@@ -710,111 +551,6 @@ class Mamba2NewV4Wrapper(nn.Module):
         )
 
 
-class Mamba2NewV5Wrapper(nn.Module):
-    def __init__(self, config, depth=None):
-        super().__init__()
-        if Mamba2NewV5 is None:
-            raise ImportError("Mamba2NewV5 is unavailable. Ensure mamba_ssm.modules.mamba2_new_v5 is importable.")
-        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
-        self.mamba = Mamba2NewV5(
-            d_model=config.n_embd,
-            d_state=config.mamba_d_state,
-            d_conv=config.mamba_d_conv,
-            window_size=config.mamba_window_size,
-            use_flash_swa=True,
-            rope_theta=config.mamba_rope_theta,
-            dropout_p=config.dropout,
-            expand=config.mamba_expand,
-            headdim=headdim,
-            d_ssm=config.mamba_d_ssm,
-            ngroups=config.mamba_ngroups,
-            D_has_hdim=config.mamba_D_has_hdim,
-            rmsnorm=(config.norm_layer == "rmsnorm"),
-            norm_before_gate=config.mamba_norm_before_gate,
-            dt_min=config.mamba_dt_min,
-            dt_max=config.mamba_dt_max,
-            dt_init_floor=config.mamba_dt_init_floor,
-            dt_limit=config.mamba_dt_limit,
-            bias=config.bias,
-            conv_bias=config.mamba_conv_bias,
-            chunk_size=config.mamba_chunk_size,
-            use_mem_eff_path=config.mamba_use_mem_eff_path,
-            layer_idx=depth,
-        )
-
-    @torch.compiler.disable
-    def forward(
-        self,
-        x,
-        seqlen=None,
-        seq_idx=None,
-        cu_seqlens=None,
-        inference_params=None,
-    ):
-        return self.mamba(
-            x,
-            seqlen=seqlen,
-            seq_idx=seq_idx,
-            cu_seqlens=cu_seqlens,
-            inference_params=inference_params,
-        )
-
-
-class Mamba2SlidingTestWrapper(nn.Module):
-    def __init__(self, config, depth=None):
-        super().__init__()
-        if Mamba2SlidingTest is None:
-            raise ImportError("Mamba2SlidingTest is unavailable. Ensure mamba_ssm is importable in this environment.")
-        headdim = config.mamba_headdim or (config.n_embd // config.n_head)
-        self.mamba = Mamba2SlidingTest(
-            d_model=config.n_embd,
-            d_state=config.mamba_d_state,
-            d_conv=config.mamba_d_conv,
-            expand=config.mamba_expand,
-            headdim=headdim,
-            d_ssm=config.mamba_d_ssm,
-            ngroups=config.mamba_ngroups,
-            D_has_hdim=config.mamba_D_has_hdim,
-            rmsnorm=(config.norm_layer == "rmsnorm"),
-            norm_before_gate=config.mamba_norm_before_gate,
-            dt_min=config.mamba_dt_min,
-            dt_max=config.mamba_dt_max,
-            dt_init_floor=config.mamba_dt_init_floor,
-            dt_limit=config.mamba_dt_limit,
-            bias=config.bias,
-            conv_bias=config.mamba_conv_bias,
-            chunk_size=config.mamba_chunk_size,
-            use_mem_eff_path=config.mamba_use_mem_eff_path,
-            layer_idx=depth,
-            window_size=config.mamba_window_size,
-            num_kv_heads=config.mamba_num_kv_heads or config.n_kv_head,
-            num_heads=config.n_head,
-            dropout_p=config.dropout,
-            rmsnorm_before_qk=config.rmsnorm_before_qk,
-            pos_encoding=config.pos_encoding,
-            rope_theta=config.rope_theta,
-            block_size=config.block_size,
-            rope_variant=config.rope_variant,
-            use_qkv_bias=config.use_qkv_bias,
-        )
-
-
-    @torch.compiler.disable
-    def forward(
-        self,
-        x,
-        seqlen=None,
-        seq_idx=None,
-        cu_seqlens=None,
-        inference_params=None,
-    ):
-        return self.mamba(
-            x,
-            seqlen=seqlen,
-            seq_idx=seq_idx,
-            cu_seqlens=cu_seqlens,
-            inference_params=inference_params,
-        )
 #
 # Transformer Block Variants
 #

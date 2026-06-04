@@ -1,54 +1,22 @@
-W0529 22:16:35.884000 2076093 site-packages/torch/distributed/run.py:793] 
-W0529 22:16:35.884000 2076093 site-packages/torch/distributed/run.py:793] *****************************************
-W0529 22:16:35.884000 2076093 site-packages/torch/distributed/run.py:793] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
-W0529 22:16:35.884000 2076093 site-packages/torch/distributed/run.py:793] *****************************************
+W0603 11:07:25.859000 990817 site-packages/torch/distributed/run.py:793] 
+W0603 11:07:25.859000 990817 site-packages/torch/distributed/run.py:793] *****************************************
+W0603 11:07:25.859000 990817 site-packages/torch/distributed/run.py:793] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W0603 11:07:25.859000 990817 site-packages/torch/distributed/run.py:793] *****************************************
 using 4 process(es)
 number of parameters: 158.16M
 number of parameters: 158.16M
 number of parameters: 158.16M
 number of parameters: 158.16M
-eval mamba_new_v3 len=1024 steps=640 attention=mamba2_new_v3
-mamba_new_v3, len=1024, val_loss=3.2700, tokens/s=214840.9, elapsed=48.81s
+eval mamba2_GQA len=1024 steps=640 attention=mamba2_GQA
+mamba_new_v3, len=1024, val_loss=3.1763, tokens/s=104114.7, elapsed=100.71s
 number of parameters: 158.16M
 number of parameters: 158.16M
 number of parameters: 158.16M
 number of parameters: 158.16M
-eval mamba_new_v3 len=2048 steps=320 attention=mamba2_new_v3
-mamba_new_v3, len=2048, val_loss=3.2426, tokens/s=263804.4, elapsed=39.75s
+eval mamba2_GQA len=2048 steps=320 attention=mamba2_GQA
+mamba_new_v3, len=2048, val_loss=3.1482, tokens/s=121032.0, elapsed=86.64s
 number of parameters: 158.16M
 number of parameters: 158.16M
 number of parameters: 158.16M
 number of parameters: 158.16M
-eval mamba_new_v3 len=4096 steps=160 attention=mamba2_new_v3
-mamba_new_v3, len=4096, val_loss=3.2285, tokens/s=274184.1, elapsed=38.24s
-number of parameters: 158.16M
-number of parameters: 158.16M
-number of parameters: 158.16M
-number of parameters: 158.16M
-eval mamba_new_v3 len=8192 steps=80 attention=mamba2_new_v3
-mamba_new_v3, len=8192, val_loss=3.2217, tokens/s=276763.5, elapsed=37.89s
-number of parameters: 154.62M
-number of parameters: 154.62M
-number of parameters: 154.62M
-number of parameters: 154.62M
-eval mamba_new_v4 len=1024 steps=640 attention=mamba2_new_v4
-mamba_new_v4, len=1024, val_loss=3.2967, tokens/s=241036.2, elapsed=43.50s
-number of parameters: 154.62M
-number of parameters: 154.62M
-number of parameters: 154.62M
-number of parameters: 154.62M
-eval mamba_new_v4 len=2048 steps=320 attention=mamba2_new_v4
-mamba_new_v4, len=2048, val_loss=3.2710, tokens/s=257117.9, elapsed=40.78s
-number of parameters: 154.62M
-number of parameters: 154.62M
-number of parameters: 154.62M
-number of parameters: 154.62M
-eval mamba_new_v4 len=4096 steps=160 attention=mamba2_new_v4
-mamba_new_v4, len=4096, val_loss=3.2608, tokens/s=267777.5, elapsed=39.16s
-number of parameters: 154.62M
-number of parameters: 154.62M
-number of parameters: 154.62M
-number of parameters: 154.62M
-eval mamba_new_v4 len=8192 steps=80 attention=mamba2_new_v4
-mamba_new_v4, len=8192, val_loss=3.2565, tokens/s=270552.6, elapsed=38.76s
-wrote /data/yinghaoliu/BlaGPT/logs/mamba_25000_length_eval_02.csv
+eval mamba2_GQA len=4096 steps=160 attention=mamba2_GQA

@@ -32,8 +32,8 @@ from bla_gpt import GPT, GPTConfig  # noqa: E402
 RUNS = {
     "Mamba2 Conv": "logs/mamba2_0/best_model_25000.pt",
     "Full Attention": "logs/regular_1/best_model_25000.pt",
-    "Ours: GQA-SWA": "logs/mamba2_new_v3_w512_0/best_model_25000.pt",
-    "MHA-SWA": "logs/mamba2_new_v5_w512_1/best_model_25000.pt",
+    "Ours: GQA-SWA": "logs/mamba2_GQA_w512_0/best_model_25000.pt",
+    "MHA-SWA": "logs/mamba2_MHA_w512_1/best_model_25000.pt",
 }
 
 COLORS = {
@@ -306,7 +306,7 @@ def main() -> None:
             heatmaps[title] = mamba_conv_proxy_heatmap(model, idx, args.layer)
         elif attention_type == "regular":
             heatmaps[title] = regular_attention_heatmap(model, idx, args.layer, args.head)
-        elif attention_type in {"mamba2_new_v3", "mamba2_new_v5"}:
+        elif attention_type in {"mamba2_GQA", "mamba2_MHA"}:
             heatmaps[title] = mamba_swa_heatmap(model, idx, args.layer, args.head)
         else:
             raise ValueError(f"Unsupported attention type: {attention_type}")

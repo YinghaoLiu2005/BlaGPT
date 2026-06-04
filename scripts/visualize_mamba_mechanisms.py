@@ -43,12 +43,12 @@ RUNS = {
     },
     "ours": {
         "label": "Ours: GQA-SWA + Mamba2",
-        "path": REPO_ROOT / "logs" / "mamba2_new_v3_w512_0" / "best_model_25000.pt",
+        "path": REPO_ROOT / "logs" / "mamba2_GQA_w512_0" / "best_model_25000.pt",
         "color": "#009E73",
     },
     "mha_swa": {
         "label": "MHA-SWA + Mamba2",
-        "path": REPO_ROOT / "logs" / "mamba2_new_v5_w512_1" / "best_model_25000.pt",
+        "path": REPO_ROOT / "logs" / "mamba2_MHA_w512_1" / "best_model_25000.pt",
         "color": "#CC79A7",
     },
     "regular": {
@@ -532,7 +532,7 @@ def plot_decay_heatmaps(
         regular_log = np.log10(np.clip(regular_map.numpy(), 1e-8, 1.0))
         regular_log = np.ma.masked_where(~mask, regular_log)
         regular_title = "Regular full attention" if regular_head < 0 else f"Regular full attention head {regular_head}"
-        im_regular = axes[0].imshow(regular_log, origin="lower", cmap=retention_cmap, vmin=-14.0, vmax=0.0, aspect="equal")
+        im_regular = axes[0].imshow(regular_log, origin="upper", cmap=retention_cmap, vmin=-14.0, vmax=0.0, aspect="equal")
         axes[0].set_title(regular_title)
         axes[0].set_xlabel(f"key offset in final {token_span} tokens")
         axes[0].set_ylabel("query position")
@@ -543,7 +543,7 @@ def plot_decay_heatmaps(
         ratio_ax = axes[3]
 
     for ax, key in zip(retention_axes, ["baseline", "ours"]):
-        im_ret = ax.imshow(log_mats[key], origin="lower", cmap=retention_cmap, vmin=-14.0, vmax=0.0, aspect="equal")
+        im_ret = ax.imshow(log_mats[key], origin="upper", cmap=retention_cmap, vmin=-14.0, vmax=0.0, aspect="equal")
         ax.set_title(diags[key].label)
         ax.set_xlabel(f"key offset in final {token_span} tokens")
         ax.set_ylabel("query position")
@@ -552,7 +552,7 @@ def plot_decay_heatmaps(
 
     im_ratio = ratio_ax.imshow(
         ratio,
-        origin="lower",
+        origin="upper",
         cmap=ratio_cmap,
         norm=TwoSlopeNorm(vmin=-2.0, vcenter=0.0, vmax=8.0),
         aspect="equal",
@@ -581,7 +581,7 @@ def plot_effective_heatmaps(diags: dict[str, MambaDiagnostics], output_dir: Path
         axis_size = mat.shape[0]
         nonzero = mat[mat > 0]
         vmax = float(np.quantile(nonzero, 0.997)) if nonzero.size else 1.0
-        im = ax.imshow(mat, origin="lower", cmap="cividis", norm=PowerNorm(gamma=0.45, vmin=0.0, vmax=vmax), aspect="equal")
+        im = ax.imshow(mat, origin="upper", cmap="cividis", norm=PowerNorm(gamma=0.45, vmin=0.0, vmax=vmax), aspect="equal")
         ax.set_title(diags[key].label)
         ax.set_xlabel(f"key offset in final {token_span} tokens")
         ax.set_ylabel("query position in final block")
@@ -615,7 +615,7 @@ def plot_regular_mamba_ours_history_map(
     for ax, (title, mat) in zip(axes, mats.items()):
         log_mat = np.log10(np.clip(mat, 1e-8, 1.0))
         log_mat = np.ma.masked_where(~mask, log_mat)
-        im = ax.imshow(log_mat, origin="lower", cmap=cmap, vmin=-6.0, vmax=0.0, aspect="equal")
+        im = ax.imshow(log_mat, origin="upper", cmap=cmap, vmin=-6.0, vmax=0.0, aspect="equal")
         ax.set_title(title)
         ax.set_xlabel(f"key offset in final {token_span} tokens")
         ax.set_ylabel("query offset")

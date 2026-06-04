@@ -23,14 +23,9 @@ from utils import get_model
 
 DEFAULT_CKPTS = {
     #"mamba_baseline": "logs/mamba2_0/state_step025000.pt",
-    #"mamba_new_v2": "logs/mamba2_new_v2_w512_1/state_step025000.pt",
-    #"mamba_new_v3": "logs/mamba2_new_v3_w512_1/state_step025000.pt",
-    #"mamba_new_v4": "logs/mamba2_new_v4_w512_0/state_step025000.pt",
-    #"mamba_new_v1_512": "logs/mamba2_new_v1_w512_1/state_step025000.pt",
-    #"mamba_new_v2_4": "logs/mamba2_new_v2_w4_0/state_step025000.pt",
     #"regular": "logs/regular_1/state_step025000.pt",
-    "mamba_new_v3": "logs/mamba2_new_v3_w512_0/state_step025000.pt",
-    "mamba_new_v4": "logs/mamba2_new_v4_w512_1/state_step025000.pt",
+    "mamba2_GQA": "logs/mamba2_GQA_w512_2/state_step078242.pt",
+    #"mamba2_MHA": "logs/mamba2_MHA_w512_1/state_step025000.pt",
 }
 
 

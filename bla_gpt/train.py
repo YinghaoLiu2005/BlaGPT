@@ -227,13 +227,8 @@ if __name__ == "__main__":
             "gated",
             "DiffAttnv2",
             "mamba2",
-            "mamba2_new",
-            "mamba2_new_v2",
-            "mamba2_new_v3",
-            "mamba2_new_v4",
-            "mamba2_new_v5",
-            "mamba2_sliding",
-            "mamba2_sliding_test",
+            "mamba2_GQA",
+            "mamba2_MHA",
         }
         if cli_args.attention not in valid_attentions:
             raise ValueError(
