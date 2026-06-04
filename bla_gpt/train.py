@@ -216,6 +216,7 @@ if __name__ == "__main__":
     if cli_args.attention is not None:
         valid_attentions = {
             "regular",
+            "flash_swa",
             "latent",
             "DiffAttn",
             "pattention",

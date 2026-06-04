@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
-from attentions import (Attention, DilatedAttention, ForgettingAttention,
+from attentions import (Attention, DilatedAttention,FlashSlidingWindowAttention, ForgettingAttention,
                         GatedAttention, KDAAttention, KVShiftingAttention,
                         MultiheadDiffAttn, MultiheadDiffAttnv2, MultiHeadLatentAttention,
                         MultiTokenAttention, PattentionSelfAttention, soft_cap)
@@ -310,6 +310,8 @@ def get_attention(config, depth=None):
 
     if attn_type == "regular":
         return Attention(config)
+    if attn_type == "flash_swa":
+        return FlashSlidingWindowAttention(config)
     if attn_type == "latent":
         return MultiHeadLatentAttention(config)
     elif attn_type == "DiffAttn":

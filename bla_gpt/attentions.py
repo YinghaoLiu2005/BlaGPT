@@ -311,6 +311,62 @@ class Attention(nn.Module):
         return self.resid_dropout(self.c_proj(y))
 
 
+class FlashSlidingWindowAttention(Attention):
+    def __init__(self, config):
+        super().__init__(config)
+        if flash_attn_func is None:
+            raise ImportError(
+                "FlashSlidingWindowAttention requires flash-attn. "
+                "Install flash_attn to use --attention flash_swa."
+            )
+        if self.soft_cap > 0 or self.use_softpick:
+            raise ValueError("FlashSlidingWindowAttention does not support soft_cap or softpick.")
+        self.window_size = 512
+
+    def forward(self, x, q=None, mask=None):
+        if q is not None:
+            raise ValueError("FlashSlidingWindowAttention only supports self-attention.")
+        if mask is not None:
+            raise ValueError(
+                "FlashSlidingWindowAttention uses flash_attn_func window_size directly; "
+                "do not pass an explicit attention mask."
+            )
+
+        B, T, C = x.size()
+        q = self._project_query(x, B, T)
+        k, v = self._project_kv(x, B, T)
+
+        if hasattr(self, "q_norm"):
+            q, k = self._apply_norm(q, k)
+
+        if hasattr(self, "rotary"):
+            q, k = self._apply_rotary(q, k, T, T)
+        elif hasattr(self, "rel_pos_emb"):
+            q, k = self._apply_relative_pos(q, k, T, T)
+            
+        if q.dtype not in (torch.float16, torch.bfloat16):
+            q, k, v = q.to(torch.bfloat16), k.to(torch.bfloat16), v.to(torch.bfloat16)
+
+        y = self._flash_attention(q, k, v)
+        return self._project_output(y, B, T, C)
+
+    def _flash_attention(self, q, k, v):
+        y = flash_attn_func(
+            q,
+            k,
+            v,
+            dropout_p=self.dropout if self.training else 0.0,
+            causal=True,
+            window_size=(self.window_size - 1, 0),
+        )
+        return y.transpose(1, 2)
+
+    def _manual_attention(self, q, k, v, T_q, T):
+        raise RuntimeError(
+            "FlashSlidingWindowAttention must use flash_attn_func with window_size=(511, 0)."
+        )
+
+
 #
 # Specialized Attention Modules
 #
