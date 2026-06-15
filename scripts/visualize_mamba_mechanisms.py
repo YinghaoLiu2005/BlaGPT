@@ -38,24 +38,30 @@ from bla_gpt import GPT, GPTConfig  # noqa: E402
 RUNS = {
     "baseline": {
         "label": "Mamba2 baseline",
-        "path": REPO_ROOT / "logs" / "mamba2_0" / "best_model_25000.pt",
+        "path": REPO_ROOT / "logs" / "mamba2_w512_0" / "best_model_78242.pt",
         "color": "#0072B2",
     },
     "ours": {
         "label": "Ours: GQA-SWA + Mamba2",
-        "path": REPO_ROOT / "logs" / "mamba2_GQA_w512_0" / "best_model_25000.pt",
+        "path": REPO_ROOT / "logs" / "mamba2_new_v3_w512_2" / "best_model_78242.pt",
         "color": "#009E73",
     },
-    "mha_swa": {
-        "label": "MHA-SWA + Mamba2",
-        "path": REPO_ROOT / "logs" / "mamba2_MHA_w512_1" / "best_model_25000.pt",
+    "kda_swa": {
+        "label": "KDA",
+        "path": REPO_ROOT / "logs" / "kda_w512_11" / "best_model_78242.pt",
         "color": "#CC79A7",
     },
     "regular": {
         "label": "Full attention",
-        "path": REPO_ROOT / "logs" / "regular_1" / "best_model_25000.pt",
+        "path": REPO_ROOT / "logs" / "regular_0" / "best_model_78242.pt",
         "color": "#D55E00",
     },
+}
+
+
+LEGACY_ATTENTION_NAMES = {
+    "mamba2_new_v3": "mamba2_GQA",
+    "mamba2_new_v5": "mamba2_MHA",
 }
 
 
@@ -112,6 +118,8 @@ def load_model(ckpt_path: Path, device: torch.device) -> GPT:
     config = GPTConfig()
     for key, value in ckpt["model_config"].items():
         if hasattr(config, key):
+            if key == "attention":
+                value = LEGACY_ATTENTION_NAMES.get(value, value)
             setattr(config, key, value)
     model = GPT(config)
     model.load_state_dict(clean_state_dict(ckpt["model"]), strict=True)
@@ -309,6 +317,200 @@ def get_effective_matrix(
     if normalize_rows:
         eff = eff / eff.sum(dim=-1, keepdim=True).clamp_min(1e-12)
     return eff
+
+
+@torch.no_grad()
+def get_conv1d_local_matrix(mamba, seq_len: int) -> torch.Tensor:
+    """Causal band matrix from the depthwise conv1d kernel.
+
+    M_conv[i, j] = |w[i-j]| for 0 <= i-j < d_conv, else 0.
+    Each row is normalised so the matrix is row-stochastic.
+    """
+    kernel = mamba.conv1d.weight.detach().abs().mean(dim=(0, 1)).float().cpu()
+    kernel = kernel / kernel.sum().clamp_min(1e-12)
+    d_conv = kernel.shape[0]
+    M = torch.zeros(seq_len, seq_len)
+    for lag in range(d_conv):
+        diag_idx = torch.arange(lag, seq_len)
+        M[diag_idx, diag_idx - lag] = kernel[lag]
+    row_sum = M.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    return M / row_sum
+
+
+@torch.no_grad()
+def get_swa_local_matrix(
+    mamba,
+    x: torch.Tensor,
+    abs_start: int,
+    head_average: bool = True,
+) -> torch.Tensor:
+    """Exact causal sliding-window attention weight matrix.
+
+    M_swa[t, s] = mean_h softmax(Q_t K_s / sqrt(d))[s] for s in window,
+    with causal masking.  Returns (T, T) row-stochastic matrix.
+    """
+    attn_input = rmsnorm(x, mamba.input_norm.weight, mamba.input_norm.eps) if hasattr(mamba, "input_norm") else x
+    _, seq_len, _ = x.shape
+    q = mamba.input_q_proj(attn_input).view(1, seq_len, mamba.attn_nheads, mamba.headdim)
+    kv_nheads = getattr(mamba, "attn_kv_nheads", mamba.attn_nheads)
+    k = mamba.input_k_proj(attn_input).view(1, seq_len, kv_nheads, mamba.headdim)
+    q = apply_rotary_abs(q, mamba.rotary_inv_freq, abs_start)
+    k = apply_rotary_abs(k, mamba.rotary_inv_freq, abs_start)
+
+    repeat = max(1, mamba.attn_nheads // kv_nheads)
+    k = k.repeat_interleave(repeat, dim=2)[0]  # (T, H, D)
+    q = q[0]                                    # (T, H, D)
+
+    scale = 1.0 / math.sqrt(mamba.headdim)
+    window = int(mamba.window_size)
+    scores = torch.einsum("thd,shd->ths", q.float(), k.float()) * scale
+    key_pos = torch.arange(seq_len)
+    q_pos = key_pos[:, None]
+    k_pos = key_pos[None, :]
+    causal = k_pos <= q_pos
+    in_window = k_pos >= q_pos - window + 1
+    mask = causal & in_window
+    scores = scores.masked_fill(~mask[None, :, :], float("-inf"))
+    probs = torch.softmax(scores, dim=-1)        # (T, H, T)
+    if head_average:
+        probs = probs.mean(dim=1)                 # (T, T)
+    else:
+        probs = probs[:, 0]                       # (T, T) head 0
+    return probs.float().cpu()
+
+
+@torch.no_grad()
+def get_ssm_effective_full(
+    diag: MambaDiagnostics,
+    normalize_rows: bool = True,
+) -> torch.Tensor:
+    """Full-resolution SSM effective mixing matrix |C_t B_s| dt_s decay(t,s).
+
+    Unlike get_effective_matrix which sub-samples positions, this returns
+    the full (T, T) matrix so it can be multiplied with a local mixing matrix.
+    """
+    T = diag.dt.shape[0]
+    dA_cumsum = diag.dA_cumsum                                    # (T, H)
+    log_decay = dA_cumsum[:, None, :] - dA_cumsum[None, :, :]   # (T, T, H)
+    positions = torch.arange(T)
+    mask = positions[None, :] <= positions[:, None]               # causal
+    decay = torch.exp(log_decay.clamp(min=-80.0, max=0.0))
+    decay = decay * mask[:, :, None].float()
+
+    cb = torch.matmul(diag.C, diag.B.transpose(0, 1)).abs()     # (T, T)
+    eff = (decay * diag.dt[None, :, :]).mean(dim=-1) * cb        # (T, T)
+    eff = eff * mask.float()
+    if normalize_rows:
+        eff = eff / eff.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    return eff
+
+
+@torch.no_grad()
+def get_global_mixing_matrix(
+    model: GPT,
+    idx: torch.Tensor,
+    abs_start: int,
+    diag: MambaDiagnostics,
+    layer_idx: int = 0,
+    variant: str = "baseline",
+    token_span: int | None = None,
+    heatmap_bins: int = 1024,
+    normalize_rows: bool = True,
+) -> torch.Tensor:
+    """Compute M_global = M_local @ M_ssm_effective.
+
+    For baseline Mamba2: M_local = causal conv1d band matrix.
+    For GQA/MHA Mamba2:  M_local = I + causal SWA attention (residual).
+
+    The product captures how token s's information flows through local mixing
+    to intermediate positions, then through the SSM to the query position t.
+    """
+    mamba = model.transformer.h[layer_idx].attn.mamba
+    seq_len = idx.shape[1]
+
+    # --- Local mixing matrix ---
+    if variant == "baseline" and hasattr(mamba, "conv1d"):
+        M_local = get_conv1d_local_matrix(mamba, seq_len)
+    else:
+        x = layer0_input(model, idx, abs_start)
+        M_swa = get_swa_local_matrix(mamba, x, abs_start)
+        M_local = torch.eye(seq_len) + M_swa   # residual connection
+
+    # --- SSM effective mixing matrix (full resolution) ---
+    M_ssm = get_ssm_effective_full(diag, normalize_rows=normalize_rows)
+
+    # --- Sub-sample for display ---
+    if token_span is not None and token_span < seq_len:
+        positions = sampled_positions(seq_len, token_span, heatmap_bins)
+        M_local = M_local[positions][:, positions]
+        M_ssm = M_ssm[positions][:, positions]
+
+    M_global = M_local @ M_ssm
+    if normalize_rows:
+        M_global = M_global / M_global.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    return M_global
+
+
+def plot_global_heatmaps(
+    models: dict[str, GPT],
+    diags: dict[str, MambaDiagnostics],
+    idx: torch.Tensor,
+    abs_start: int,
+    output_dir: Path,
+    token_span: int = 2048,
+    heatmap_bins: int = 512,
+    regular_map: torch.Tensor | None = None,
+    regular_head: int = 0,
+) -> None:
+    """Plot global mixing heatmaps: conv1d+SSM vs SWA+SSM, with optional full-attention baseline."""
+    variants = {
+        "baseline": ("Mamba2 baseline\n(conv1d + SSM)", models["baseline"]),
+        "ours":     ("Ours: GQA-SWA + Mamba2\n(SWA + SSM)", models["ours"]),
+    }
+    global_mats = {}
+    for key, (label, model) in variants.items():
+        print(f"  Computing global mixing matrix for {key} ...")
+        global_mats[key] = get_global_mixing_matrix(
+            model, idx, abs_start, diag=diags[key], layer_idx=0, variant=key,
+            token_span=token_span, heatmap_bins=heatmap_bins, normalize_rows=True,
+        ).numpy()
+
+    axis_size = next(iter(global_mats.values())).shape[0]
+    mask = np.tril(np.ones((axis_size, axis_size), dtype=bool))
+
+    n_panels = 2 + (1 if regular_map is not None else 0)
+    fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 4.0), constrained_layout=True)
+    if n_panels == 1:
+        axes = [axes]
+
+    panel_idx = 0
+    if regular_map is not None:
+        log_mat = np.log10(np.clip(regular_map.numpy(), 1e-8, 1.0))
+        log_mat = np.ma.masked_where(~mask, log_mat)
+        title = "Regular full attention" if regular_head < 0 else f"Regular full attention head {regular_head}"
+        axes[panel_idx].imshow(log_mat, origin="upper", cmap="magma", vmin=-8.0, vmax=0.0, aspect="equal")
+        axes[panel_idx].set_title(title)
+        panel_idx += 1
+
+    for key in ["baseline", "ours"]:
+        label = variants[key][0]
+        log_mat = np.log10(np.clip(global_mats[key], 1e-12, 1.0))
+        log_mat = np.ma.masked_where(~mask, log_mat)
+        axes[panel_idx].imshow(log_mat, origin="upper", cmap="magma", vmin=-8.0, vmax=0.0, aspect="equal")
+        axes[panel_idx].set_title(label)
+        panel_idx += 1
+
+    for ax in axes:
+        ax.set_xlabel("key position (source)")
+        ax.set_ylabel("query position (target)")
+        set_block_ticks(ax, axis_size, token_span)
+        add_lag_guides(ax, axis_size, token_span, color="white", text_color="#1A1A1A")
+
+    cbar = fig.colorbar(ax.images[0], ax=axes, fraction=0.035, pad=0.018)
+    cbar.set_label("log10 row-normalized mixing weight")
+    fig.suptitle(f"Global mixing: local mechanism × SSM (final {token_span} tokens, {axis_size} bins)")
+    savefig(fig, output_dir / "07_global_mixing_heatmaps.png")
+    print(f"  Saved global mixing heatmap to {output_dir / '07_global_mixing_heatmaps.png'}")
 
 
 @torch.no_grad()
@@ -821,6 +1023,9 @@ def main() -> None:
     plot_regular_mamba_ours_history_map(regular_map, diags, args.output_dir, args.view_size, args.heatmap_bins, args.regular_head)
     plot_profiles(diags, attn_profiles, args.output_dir, profile_max_lag, args.query_count)
     plot_half_life(models, args.output_dir)
+    plot_global_heatmaps(models, diags, idx, abs_start, args.output_dir,
+                         token_span=args.view_size, heatmap_bins=args.heatmap_bins,
+                         regular_map=regular_map, regular_head=args.regular_head)
     write_summary_metrics(diags, models, attn_profiles, args.output_dir, profile_max_lag, args.query_count)
 
     print(f"Saved figures to {args.output_dir}")

@@ -24,8 +24,15 @@ from utils import get_model
 DEFAULT_CKPTS = {
     #"mamba_baseline": "logs/mamba2_0/state_step025000.pt",
     #"regular": "logs/regular_1/state_step025000.pt",
-    "mamba2_GQA": "logs/mamba2_GQA_w512_2/state_step078242.pt",
-    #"mamba2_MHA": "logs/mamba2_MHA_w512_1/state_step025000.pt",
+    #"mamba2_GQA": "logs/mamba2_new_v3_w512_2/state_step078242.pt",
+    #"mamba2_baseline": "logs/mamba2_w512_0/state_step078242.pt",
+    "kda": "logs/kda_w512_11/state_step078242.pt",
+}
+
+
+LEGACY_ATTENTION_NAMES = {
+    "mamba2_new_v3": "mamba2_GQA",
+    "mamba2_new_v5": "mamba2_MHA",
 }
 
 
@@ -76,6 +83,8 @@ def build_model(model_name, ckpt, sequence_length, compile_model):
     model_config, model_ctor = get_model(model_name)
     for key, value in ckpt["model_config"].items():
         if hasattr(model_config, key):
+            if key == "attention":
+                value = LEGACY_ATTENTION_NAMES.get(value, value)
             setattr(model_config, key, value)
     model_config.block_size = sequence_length
 

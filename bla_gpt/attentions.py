@@ -803,6 +803,14 @@ class KDAAttention(Attention):
         self.use_short_conv = getattr(config, 'kda_use_short_conv', True)
         self.conv_kernel_size = 4
 
+        if config.n_head % config.n_kv_head != 0:
+            valid_n_kv_head = max(
+                candidate
+                for candidate in range(1, config.n_kv_head + 1)
+                if config.n_head % candidate == 0
+            )
+            config.n_kv_head = valid_n_kv_head
+
         # Compute decay rank before super().__init__() which calls set_layers()
         head_dim = config.n_embd // config.n_head
         self.decay_rank = getattr(config, 'kda_decay_rank', None) or head_dim

@@ -30,17 +30,23 @@ from bla_gpt import GPT, GPTConfig  # noqa: E402
 
 
 RUNS = {
-    "Mamba2 Conv": "logs/mamba2_0/best_model_25000.pt",
-    "Full Attention": "logs/regular_1/best_model_25000.pt",
-    "Ours: GQA-SWA": "logs/mamba2_GQA_w512_0/best_model_25000.pt",
-    "MHA-SWA": "logs/mamba2_MHA_w512_1/best_model_25000.pt",
+    "Mamba2 Conv": "logs/mamba2_w512_0/best_model_78242.pt",
+    "Full Attention": "logs/regular_0/best_model_78242.pt",
+    "Mamba-GQA-SWA": "logs/mamba2_new_v3_w512_2/best_model_78242.pt",
+    #"KDA": "logs/kda_w512_11/best_model_78242.pt",
 }
 
 COLORS = {
     "Mamba2 Conv": "#0072B2",
     "Full Attention": "#D55E00",
-    "Ours: GQA-SWA": "#009E73",
-    "MHA-SWA": "#CC79A7",
+    "Mamba-GQA-SWA": "#009E73",
+    #"KDA": "#CC79A7",
+}
+
+
+LEGACY_ATTENTION_NAMES = {
+    "mamba2_new_v3": "mamba2_GQA",
+    "mamba2_new_v5": "mamba2_MHA",
 }
 
 
@@ -67,6 +73,8 @@ def load_model(ckpt_path: Path, device: torch.device) -> GPT:
     config = GPTConfig()
     for key, value in ckpt["model_config"].items():
         if hasattr(config, key):
+            if key == "attention":
+                value = LEGACY_ATTENTION_NAMES.get(value, value)
             setattr(config, key, value)
     model = GPT(config)
     model.load_state_dict(clean_state_dict(ckpt["model"]), strict=True)

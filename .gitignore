@@ -167,3 +167,6 @@ bla_gpt/logs/*
 data/fineweb10B
 data/fineweb10B_bytes
 data/fineweb10B_text
+data/fineweb100B
+docs/*
+lm-evaluation-harness/*

@@ -27,9 +27,16 @@ from modules.pattention import Pattention
 from norms import DyTNorm, LayerNorm, RMSNorm
 from torch.nn import functional as F
 
-from mamba_ssm import Mamba2
-from mamba_ssm.modules.mamba2_GQA import Mamba2 as Mamba2GQA
-from mamba_ssm.modules.mamba2_MHA import Mamba2 as Mamba2MHA
+try:
+    from mamba_ssm import Mamba2
+    from mamba_ssm.modules.mamba2_GQA import Mamba2 as Mamba2GQA
+    from mamba_ssm.modules.mamba2_MHA import Mamba2 as Mamba2MHA
+    MAMBA_IMPORT_ERROR = None
+except Exception as exc:
+    Mamba2 = None
+    Mamba2GQA = None
+    Mamba2MHA = None
+    MAMBA_IMPORT_ERROR = exc
 
 
 #
@@ -44,8 +51,8 @@ class GPTConfig(Coqpit):
     block_size: int = 1024
     vocab_size: int = 50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
-    n_head: int = 13
-    n_embd: int = 832
+    n_head: int = 14
+    n_embd: int =896
     n_latentd: int = 0  # 192  # only for MultiHeadLatentAttention
     dropout: float = 0.0
     bias: bool = True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
@@ -411,7 +418,9 @@ class Mamba2Wrapper(nn.Module):
     def __init__(self, config, depth=None):
         super().__init__()
         if Mamba2 is None:
-            raise ImportError("Mamba2 is unavailable. Ensure mamba_ssm is importable in this environment.")
+            raise ImportError(
+                "Mamba2 is unavailable. Ensure mamba_ssm is importable in this environment."
+            ) from MAMBA_IMPORT_ERROR
         headdim = config.mamba_headdim or (config.n_embd // config.n_head)
         self.mamba = Mamba2(
             d_model=config.n_embd,
@@ -457,7 +466,9 @@ class Mamba2GQAWrapper(nn.Module):
     def __init__(self, config, depth=None):
         super().__init__()
         if Mamba2GQA is None:
-            raise ImportError("Mamba2GQA is unavailable. Ensure mamba_ssm.modules.mamba2_GQA is importable.")
+            raise ImportError(
+                "Mamba2GQA is unavailable. Ensure mamba_ssm.modules.mamba2_GQA is importable."
+            ) from MAMBA_IMPORT_ERROR
         headdim = config.mamba_headdim or (config.n_embd // config.n_head)
         self.mamba = Mamba2GQA(
             d_model=config.n_embd,
@@ -507,7 +518,9 @@ class Mamba2MHAWrapper(nn.Module):
     def __init__(self, config, depth=None):
         super().__init__()
         if Mamba2MHA is None:
-            raise ImportError("Mamba2MHA is unavailable. Ensure mamba_ssm.modules.mamba2_MHA is importable.")
+            raise ImportError(
+                "Mamba2MHA is unavailable. Ensure mamba_ssm.modules.mamba2_MHA is importable."
+            ) from MAMBA_IMPORT_ERROR
         headdim = config.mamba_headdim or (config.n_embd // config.n_head)
         self.mamba = Mamba2MHA(
             d_model=config.n_embd,
