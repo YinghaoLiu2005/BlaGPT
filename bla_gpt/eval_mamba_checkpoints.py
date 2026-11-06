@@ -13,12 +13,15 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BLA_GPT_DIR = REPO_ROOT / "bla_gpt"
 MAMBA_DIR = REPO_ROOT / "mamba"
+CHECKPOINT_ATTENTION_DIR = REPO_ROOT / "lm-evaluation-harness" / "lm_eval" / "models"
 for path in (str(BLA_GPT_DIR), str(MAMBA_DIR), str(REPO_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
+sys.path.append(str(CHECKPOINT_ATTENTION_DIR))
 
 from train import DistributedDataLoader
 from utils import get_model
+from blagpt_checkpoint_attention import install_checkpoint_attention
 
 
 DEFAULT_CKPTS = {
@@ -88,7 +91,14 @@ def build_model(model_name, ckpt, sequence_length, compile_model):
             setattr(model_config, key, value)
     model_config.block_size = sequence_length
 
-    model = model_ctor(model_config).cuda().eval()
+    checkpoint_attention = model_config.attention
+    if checkpoint_attention == "fla_kda":
+        model_config.attention = "regular"
+    model = model_ctor(model_config)
+    if checkpoint_attention == "fla_kda":
+        install_checkpoint_attention(model, checkpoint_attention, model_config, ckpt["model_config"])
+        model_config.attention = checkpoint_attention
+    model = model.cuda().eval()
     if compile_model:
         model = torch.compile(model)
     load_state_dict(model, ckpt["model"])

@@ -32,6 +32,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         d_conv=4,
         window_size=None,
         use_flash_swa=True,
+        gqa_num_kv_heads=None,
         rope_theta=500000.0,
         dropout_p=0.0,
         conv_init=None,
@@ -65,6 +66,7 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         self.d_conv = d_conv
         self.window_size = d_conv if window_size is None else window_size
         self.use_flash_swa = use_flash_swa
+        self.gqa_num_kv_heads = gqa_num_kv_heads
         self.rope_theta = rope_theta
         self.dropout_p = dropout_p
         self.conv_init = conv_init
@@ -102,8 +104,14 @@ class Mamba2(nn.Module, PyTorchModelHubMixin):
         assert self.d_model % self.headdim == 0, "Flash SWA GQA requires d_model to be divisible by headdim"
         assert self.headdim % 2 == 0, "RoPE requires an even attention head dimension"
         self.attn_nheads = self.d_model // self.headdim
-        assert self.attn_nheads % 4 == 0, "GQA experiment expects q heads to be divisible by 4"
-        self.attn_kv_nheads = self.attn_nheads // 4
+        self.attn_kv_nheads = (
+            max(1, self.attn_nheads // 4)
+            if self.gqa_num_kv_heads is None
+            else int(self.gqa_num_kv_heads)
+        )
+        assert 0 < self.attn_kv_nheads <= self.attn_nheads, (
+            "GQA KV heads must be in [1, number of query heads]"
+        )
         assert self.attn_nheads % self.attn_kv_nheads == 0, "GQA requires q heads to be divisible by kv heads"
         self.attn_head_dim = self.d_model // self.attn_nheads
         attn_kv_dim = self.attn_kv_nheads * self.attn_head_dim

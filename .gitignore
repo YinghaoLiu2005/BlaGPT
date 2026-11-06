@@ -170,3 +170,9 @@ data/fineweb10B_text
 data/fineweb100B
 docs/*
 lm-evaluation-harness/*
+scripts/*
+synthesis_test/*
+visualization/*
+visualization_25000/*
+visualization_78242_softmax_mean/*
+data/social_iqa
