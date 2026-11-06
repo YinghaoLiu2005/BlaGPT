@@ -1,0 +1,9 @@
+# The upstream setup.py contains the common Zoology dependencies.
+# Install a CUDA-matched torch first, then:
+pydantic
+wandb
+flash-linear-attention
+causal-conv1d
+transformers
+rotary-embedding-torch
+einx
