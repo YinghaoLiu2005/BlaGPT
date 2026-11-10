@@ -1,0 +1,495 @@
+{
+  "status": "PASS",
+  "validated_at": "2026-11-10T12:57:07.347595+08:00",
+  "scope": {
+    "native_model_task_combinations": 15,
+    "native_batch_size": 2,
+    "native_train_lengths": {
+      "mqar": 256,
+      "palindrome": 2049,
+      "stack": 1024
+    },
+    "native_max_eval_lengths": {
+      "mqar": 2048,
+      "palindrome": 4097,
+      "stack": 2048
+    },
+    "original_trainer_integrations": 15,
+    "integration_steps_each": 2,
+    "integration_batch_size": 2,
+    "integration_num_examples_per_split": 4,
+    "integration_seq_len": 128,
+    "formal_training_started": false
+  },
+  "additional_checks": {
+    "finite_training_losses_all_15_runs": true,
+    "analysis_scripts_smoke": [
+      "mqar",
+      "palindrome",
+      "stack"
+    ],
+    "shell_syntax": true,
+    "formal_launcher_dry_run_count": 15,
+    "independent_extraction_cpu_tests": true,
+    "independent_extraction_gpu_operator_tests": true
+  },
+  "artifact_sha256": {
+    "README.md": "2b3ac7ccb357d0062c2de5e2ff6be4937ac90c6cdb4591333f0598f164c9611e",
+    "analysis_plot_style.py": "b39d88ca6229d204b6f562999ff60eb7604036bb96d0d18cae27e5585745560f",
+    "analyze_all.sh": "5e0fe241f9300a30cc1087e03020f773b3457d5289be675ec320b03ed416a236",
+    "check_operators.py": "06a08c1f2c1b3fd908175b1b47065c02e38b11633fde26fa5ce9fa8162f143c0",
+    "lit_gpt/__init__.py": "a0234f3cd96a7031a29ff025d7eaba1d53cb17ee6d82532afc461dde4f7eb329",
+    "lit_gpt/config.py": "5386dd866f16a0fcd3ced8c0e4b656c8a27598f3e61fb5cbcb3b6c39df2df831",
+    "lit_gpt/fused_cross_entropy.py": "e04e544619f6a03bbd68b0ac8ce7ca6ddf3da66538bcdcd73b18fb726be4616a",
+    "lit_gpt/model.py": "0f3dd64bef506e54e06fcfd9c7fd3504279ea9cfcc3aeb6022f887a160ea46e9",
+    "lit_gpt/rmsnorm.py": "156966150bfba3e43465d1c84819dc3c1698adae7d3ae4c249704b068832da72",
+    "lit_gpt/utils.py": "d6d6bd7849b1dcd4ce4f7cf9ccb2d943944b7ded16f0dd778ec68f7ce909850d",
+    "mqar_analysis.py": "e0b3802651b9c49c2686ab1c61d4c8a08fa7d48adc64a71eab912197a6b74f8a",
+    "mqar_data.py": "8d0bb34d3261f5e4e2ac33475eca50a6ffb466600390c96735f264426a81c5dd",
+    "pack.sh": "33ed6d404be0fce3d6f0337c4096b14fd1292190028f4a0d342a35c9028c7c5f",
+    "palindrome_analysis.py": "45f86675c9ba3694ddfd8378b20aee5e53802bef3422d3eb9ef25002a6547926",
+    "palindrome_data.py": "2ce2f7725c4ce6e4616bbed0cc59ea6d9c89e0348b1ac76973cae6086611dee6",
+    "python_dispatch.sh": "e098a96a47bcbd9f1f3ffcdb6961db8740709597579f4c821f38a0d95edab613",
+    "requirements-common.txt": "66225736cea7683f9ab114e8261081c00ca61b07a2a8e89e12b82d4bb896c463",
+    "requirements-fla.txt": "0bd0a7f3e82873d333dcef92f4b0c44a9e56a211f5547691a46f2deeec4cc397",
+    "requirements-mamba.txt": "f51f3a2c8131a3424cfc45cd54312223f6ed00c11fabbd62262a520f1bece65c",
+    "run_all.sh": "cfd41db98aaf71d18902527d8918b78a5444dd183ee9fcd91c5076a35801c6c5",
+    "run_mqar_experiment.sh": "36fa798e2cf049d0c212a9c3bbda3ae8919c3565d1f3dfdf6aade84a52037d3e",
+    "run_palindrome_experiment.sh": "5eed9acbcb71e9cbdb95f3661d65007ba739101b9d831bc2dc9d3290ef1eee75",
+    "run_stack_experiment.sh": "01f8f92831f25ca81cfa89fb7be487b4b9aa7abb0825949280d003153c09d4f5",
+    "setup_env.sh": "a10c5e171b0b89a8bf113034616091e0efb16a2d41e9bc419aad8a36eeb11b70",
+    "source_manifest.json": "37bba2d3ebda5c58c0f6b1a2df871799b4930328fb76162b80cf9f1f5c0761e3",
+    "stack_analysis.py": "5ac404cd0f9d441ed8592d3dc8249b8a517b5e4118a10a4b8ae1c47f8b069059",
+    "stack_data.py": "dcb5584cd4bcaa0ad6b522b1fb1c71d0b3a812571f7257730e844ce08a6cff95",
+    "train_mqar.py": "eee237045939b0408cbd3a2eaf73a78e33f954897a14e180b48f3fa5a5cd2345",
+    "train_palindrome.py": "c8cb3f2255157679a5e1f6d654034c5a8df345ca97cc3974ccd17f20f5e04c62",
+    "train_stack.py": "694d63d674d61eec4d18243c2f1ea5419dabfa2fa5e7291e5746abe205bcd998",
+    "verify.py": "a40a27f48ac16000ee29bb59de4ea4ca9f7672b0d107fe09d1c8ed866aaeee11"
+  },
+  "details": {
+    "cpu": {
+      "integrity": {
+        "hashed_files": 428,
+        "unchanged_task_files": 9,
+        "launcher_config_parity": 3
+      },
+      "data": {
+        "data_parity": [
+          "mqar",
+          "palindrome",
+          "stack"
+        ],
+        "independent_oracles": [
+          "palindrome",
+          "stack"
+        ],
+        "model_task_configs": 15,
+        "plot_labels_distinct": true
+      }
+    },
+    "KDA": {
+      "native": {
+        "torch": "2.7.1+cu118",
+        "cuda": "11.8",
+        "gpu": "NVIDIA GeForce RTX 3090",
+        "checks": [
+          {
+            "task": "mqar",
+            "architecture": "KDA",
+            "loss": 9.091009140014648,
+            "train_tokens": 256,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/fla/fla/layers/kda.py"
+          },
+          {
+            "task": "palindrome",
+            "architecture": "KDA",
+            "loss": 4.902565002441406,
+            "train_tokens": 2049,
+            "eval_tokens": 4097,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/fla/fla/layers/kda.py"
+          },
+          {
+            "task": "stack",
+            "architecture": "KDA",
+            "loss": 4.879833698272705,
+            "train_tokens": 1024,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/fla/fla/layers/kda.py"
+          }
+        ]
+      },
+      "integration": [
+        {
+          "task": "mqar",
+          "architecture": "KDA",
+          "steps": 2,
+          "test_acc": 0.0,
+          "evaluation": {
+            "1x": 0.0,
+            "2x": 0.0
+          }
+        },
+        {
+          "task": "palindrome",
+          "architecture": "KDA",
+          "steps": 2,
+          "test_acc": 0.009765625,
+          "evaluation": {
+            "128": 0.009765625,
+            "256": 0.01171875
+          }
+        },
+        {
+          "task": "stack",
+          "architecture": "KDA",
+          "steps": 2,
+          "test_acc": 0.01515151560306549,
+          "evaluation": {
+            "128": 0.032258063554763794,
+            "256": 0.056910570710897446
+          }
+        }
+      ]
+    },
+    "GDN": {
+      "native": {
+        "torch": "2.7.1+cu118",
+        "cuda": "11.8",
+        "gpu": "NVIDIA GeForce RTX 3090",
+        "checks": [
+          {
+            "task": "mqar",
+            "architecture": "GDN",
+            "loss": 9.01206111907959,
+            "train_tokens": 256,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/fla/fla/layers/gated_deltanet.py"
+          },
+          {
+            "task": "palindrome",
+            "architecture": "GDN",
+            "loss": 4.913078308105469,
+            "train_tokens": 2049,
+            "eval_tokens": 4097,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/fla/fla/layers/gated_deltanet.py"
+          },
+          {
+            "task": "stack",
+            "architecture": "GDN",
+            "loss": 4.945593357086182,
+            "train_tokens": 1024,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/fla/fla/layers/gated_deltanet.py"
+          }
+        ]
+      },
+      "integration": [
+        {
+          "task": "mqar",
+          "architecture": "GDN",
+          "steps": 2,
+          "test_acc": 0.0,
+          "evaluation": {
+            "1x": 0.0,
+            "2x": 0.0
+          }
+        },
+        {
+          "task": "palindrome",
+          "architecture": "GDN",
+          "steps": 2,
+          "test_acc": 0.001953125,
+          "evaluation": {
+            "128": 0.017578125,
+            "256": 0.0068359375
+          }
+        },
+        {
+          "task": "stack",
+          "architecture": "GDN",
+          "steps": 2,
+          "test_acc": 0.0,
+          "evaluation": {
+            "128": 0.0,
+            "256": 0.016260161995887756
+          }
+        }
+      ]
+    },
+    "Mamba2": {
+      "native": {
+        "torch": "2.5.0",
+        "cuda": "12.1",
+        "gpu": "NVIDIA GeForce RTX 3090",
+        "checks": [
+          {
+            "task": "mqar",
+            "architecture": "Mamba2",
+            "loss": 9.127193450927734,
+            "train_tokens": 256,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/mamba/mamba_ssm/modules/mamba2.py"
+          },
+          {
+            "task": "palindrome",
+            "architecture": "Mamba2",
+            "loss": 4.9070281982421875,
+            "train_tokens": 2049,
+            "eval_tokens": 4097,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/mamba/mamba_ssm/modules/mamba2.py"
+          },
+          {
+            "task": "stack",
+            "architecture": "Mamba2",
+            "loss": 4.893210411071777,
+            "train_tokens": 1024,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/mamba/mamba_ssm/modules/mamba2.py"
+          }
+        ]
+      },
+      "integration": [
+        {
+          "task": "mqar",
+          "architecture": "Mamba2",
+          "steps": 2,
+          "test_acc": 0.0,
+          "evaluation": {
+            "1x": 0.0,
+            "2x": 0.0
+          }
+        },
+        {
+          "task": "palindrome",
+          "architecture": "Mamba2",
+          "steps": 2,
+          "test_acc": 0.005859375,
+          "evaluation": {
+            "128": 0.017578125,
+            "256": 0.0048828125
+          }
+        },
+        {
+          "task": "stack",
+          "architecture": "Mamba2",
+          "steps": 2,
+          "test_acc": 0.06060606241226196,
+          "evaluation": {
+            "128": 0.016129031777381897,
+            "256": 0.04065040498971939
+          }
+        }
+      ]
+    },
+    "Mamba2GQA": {
+      "native": {
+        "torch": "2.5.0",
+        "cuda": "12.1",
+        "gpu": "NVIDIA GeForce RTX 3090",
+        "checks": [
+          {
+            "task": "mqar",
+            "architecture": "Mamba2GQA",
+            "loss": 8.997806549072266,
+            "train_tokens": 256,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/mamba/mamba_ssm/modules/mamba2_GQA.py"
+          },
+          {
+            "task": "palindrome",
+            "architecture": "Mamba2GQA",
+            "loss": 4.8921051025390625,
+            "train_tokens": 2049,
+            "eval_tokens": 4097,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/mamba/mamba_ssm/modules/mamba2_GQA.py"
+          },
+          {
+            "task": "stack",
+            "architecture": "Mamba2GQA",
+            "loss": 4.9262590408325195,
+            "train_tokens": 1024,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/mamba/mamba_ssm/modules/mamba2_GQA.py"
+          }
+        ]
+      },
+      "integration": [
+        {
+          "task": "mqar",
+          "architecture": "Mamba2GQA",
+          "steps": 2,
+          "test_acc": 0.0,
+          "evaluation": {
+            "1x": 0.0,
+            "2x": 0.0
+          }
+        },
+        {
+          "task": "palindrome",
+          "architecture": "Mamba2GQA",
+          "steps": 2,
+          "test_acc": 0.001953125,
+          "evaluation": {
+            "128": 0.0078125,
+            "256": 0.0087890625
+          }
+        },
+        {
+          "task": "stack",
+          "architecture": "Mamba2GQA",
+          "steps": 2,
+          "test_acc": 0.01515151560306549,
+          "evaluation": {
+            "128": 0.016129031777381897,
+            "256": 0.024390242993831635
+          }
+        }
+      ]
+    },
+    "Mamba2GQASink": {
+      "native": {
+        "torch": "2.5.0",
+        "cuda": "12.1",
+        "gpu": "NVIDIA GeForce RTX 3090",
+        "checks": [
+          {
+            "task": "mqar",
+            "architecture": "Mamba2GQASink",
+            "loss": 8.996710777282715,
+            "train_tokens": 256,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/mamba/mamba_ssm/modules/mamba-gqa-sink.py"
+          },
+          {
+            "task": "palindrome",
+            "architecture": "Mamba2GQASink",
+            "loss": 4.8921051025390625,
+            "train_tokens": 2049,
+            "eval_tokens": 4097,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/mamba/mamba_ssm/modules/mamba-gqa-sink.py"
+          },
+          {
+            "task": "stack",
+            "architecture": "Mamba2GQASink",
+            "loss": 4.926708698272705,
+            "train_tokens": 1024,
+            "eval_tokens": 2048,
+            "finite_gradients": true,
+            "optimizer_update": true,
+            "causal": true,
+            "checkpoint_roundtrip": true,
+            "source": "vendor/mamba/mamba_ssm/modules/mamba-gqa-sink.py"
+          }
+        ]
+      },
+      "integration": [
+        {
+          "task": "mqar",
+          "architecture": "Mamba2GQASink",
+          "steps": 2,
+          "test_acc": 0.0,
+          "evaluation": {
+            "1x": 0.0,
+            "2x": 0.0
+          }
+        },
+        {
+          "task": "palindrome",
+          "architecture": "Mamba2GQASink",
+          "steps": 2,
+          "test_acc": 0.001953125,
+          "evaluation": {
+            "128": 0.0078125,
+            "256": 0.0087890625
+          }
+        },
+        {
+          "task": "stack",
+          "architecture": "Mamba2GQASink",
+          "steps": 2,
+          "test_acc": 0.01515151560306549,
+          "evaluation": {
+            "128": 0.016129031777381897,
+            "256": 0.024390242993831635
+          }
+        }
+      ]
+    },
+    "operators": {
+      "rmsnorm_forward_backward": true,
+      "kla_initialization_exact": true,
+      "cross_entropy_forward_backward": true,
+      "sink_dense_reference": [
+        {
+          "heads": 4,
+          "head_dim": 64,
+          "max_output_error": 0.0012586116790771484,
+          "max_sink_gradient_error": 0.00046634674072265625
+        },
+        {
+          "heads": 2,
+          "head_dim": 128,
+          "max_output_error": 0.0016109943389892578,
+          "max_sink_gradient_error": 0.00010335445404052734
+        }
+      ]
+    }
+  }
+}

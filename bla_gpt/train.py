@@ -187,7 +187,7 @@ class Hyperparameters(Coqpit):
 # int main
 
 if __name__ == "__main__":
-    from argparse import ArgumentParser
+    from argparse import ArgumentParser, BooleanOptionalAction
 
     parser = ArgumentParser()
     parser.add_argument("--config", type=str, default=None)
@@ -196,6 +196,10 @@ if __name__ == "__main__":
     parser.add_argument("--resume",type=str, default=None, help="path to checkpoint to resume from")
     parser.add_argument("--attention", type=str, default=None, help="Override GPTConfig.attention")
     parser.add_argument("--mamba_window_size",type=int,default=None,help="Override GPTConfig.mamba_window_size for Mamba sliding-window layers",)
+    parser.add_argument("--mamba_use_attn_sink", action=BooleanOptionalAction, default=None,
+                        help="Enable/disable virtual attention sinks in Mamba2-GQA")
+    parser.add_argument("--mamba_sink_init", type=float, default=None,
+                        help="Initial per-query-head sink logit (default: -2.0)")
     parser.add_argument("--num_epochs", type=float, default=None, help="Override num_iterations by running this many full training dataset passes")
     cli_args = parser.parse_args()
 
@@ -242,6 +246,11 @@ if __name__ == "__main__":
             raise ValueError("--mamba_window_size must be a positive integer")
         model_config.mamba_window_size = cli_args.mamba_window_size
 
+    if cli_args.mamba_use_attn_sink is not None:
+        model_config.mamba_use_attn_sink = cli_args.mamba_use_attn_sink
+    if cli_args.mamba_sink_init is not None:
+        model_config.mamba_sink_init = cli_args.mamba_sink_init
+
     if cli_args.num_epochs is not None:
         if cli_args.num_epochs < 0:
             raise ValueError("--num_epochs must be non-negative")
@@ -274,6 +283,7 @@ if __name__ == "__main__":
             f"Accumulation steps: {train_accumulation_steps}",
             f"Attention: {model_config.attention}",
             f"Mamba window size: {model_config.mamba_window_size}",
+            f"Mamba attention sink: {model_config.mamba_use_attn_sink} (init={model_config.mamba_sink_init})",
         ]
         for line in run_summary_lines:
             print(line)

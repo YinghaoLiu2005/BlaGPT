@@ -1,0 +1,7 @@
+-r requirements-common.txt
+# Install torch==2.5.0 first; build CUDA extensions with --no-build-isolation.
+transformers==5.6.2
+huggingface-hub==1.15.0
+causal-conv1d==1.6.1
+mamba-ssm==2.3.1
+flash-attn==2.6.3

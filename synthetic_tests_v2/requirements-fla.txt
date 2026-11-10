@@ -1,0 +1,4 @@
+-r requirements-common.txt
+# Install torch==2.7.1 with the CUDA wheel appropriate for your server first.
+transformers==5.10.2
+huggingface-hub==1.18.0

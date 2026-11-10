@@ -1,0 +1,11 @@
+numpy==2.2.6
+einops==0.8.2
+lightning==2.5.0.post0
+pytorch-lightning==2.5.0.post0
+torchmetrics==1.6.1
+lightning-utilities==0.15.3
+wandb==0.19.11
+packaging==24.2
+pandas==2.3.3
+matplotlib==3.10.9
+tqdm==4.67.3

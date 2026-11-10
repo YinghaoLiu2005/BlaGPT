@@ -64,17 +64,23 @@ class Mamba2(nn.Module):
 
 class Mamba2GQA(nn.Module):
     """The user's local GQA-SWA Mamba2 implementation, isolated from Zoology."""
-    def __init__(self, d_model: int, layer_idx: int = None, **kwargs):
+    def __init__(self, d_model: int, layer_idx: int = None,
+                 use_attn_sink: bool = False, sink_init: float = -2.0,
+                 window_size: int = 128, **kwargs):
         super().__init__()
-        source = Path(__file__).resolve().parents[3] / "third_party" / "mamba_ssm" / "modules" / "mamba2_GQA.py"
-        spec = importlib.util.spec_from_file_location("mamba_ssm.modules.mamba2_GQA_local", source)
+        filename = "mamba-gqa-sink.py" if use_attn_sink else "mamba2_GQA.py"
+        source = Path(__file__).resolve().parents[3] / "third_party" / "mamba_ssm" / "modules" / filename
+        module_name = "mamba_gqa_sink_local" if use_attn_sink else "mamba2_GQA_local"
+        spec = importlib.util.spec_from_file_location(f"mamba_ssm.modules.{module_name}", source)
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         _Mamba2GQA = module.Mamba2
         self.layer = _Mamba2GQA(
-            d_model=d_model, d_state=128, d_conv=4, window_size=128,
+            d_model=d_model, d_state=128, d_conv=4, window_size=window_size,
             use_flash_swa=True, gqa_num_kv_heads=1, expand=1,
+            # Expose the sink ablation through Zoology's sequence_mixer kwargs.
+            **(dict(use_attn_sink=True, sink_init=sink_init) if use_attn_sink else {}),
             headdim=128, ngroups=1, rmsnorm=True, chunk_size=256,
             use_mem_eff_path=False, layer_idx=layer_idx,
         )

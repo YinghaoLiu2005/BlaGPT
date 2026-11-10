@@ -151,6 +151,9 @@ class GPTConfig(Coqpit):
     mamba_window_size: int = 512
     mamba_num_kv_heads: int = None
     mamba_rope_theta: float = 500000.0
+    # Virtual zero-value sinks in the GQA attention front-end (opt-in ablation).
+    mamba_use_attn_sink: bool = False
+    mamba_sink_init: float = -2.0
 
     # KDA interleaving parameters (like Kimi-Linear's 3:1 KDA-to-full-attention ratio)
     use_kda_interleaving: bool = False  # Enable KDA/full attention interleaving
@@ -465,17 +468,34 @@ class Mamba2Wrapper(nn.Module):
 class Mamba2GQAWrapper(nn.Module):
     def __init__(self, config, depth=None):
         super().__init__()
-        if Mamba2GQA is None:
+        gqa_class = Mamba2GQA
+        sink_kwargs = {}
+        if config.mamba_use_attn_sink:
+            # The requested hyphenated filename needs loading by path.
+            import importlib.util
+            import sys
+            from pathlib import Path
+            module_name = "bla_gpt_mamba_gqa_sink"
+            if module_name not in sys.modules:
+                source = Path(__file__).resolve().parents[1] / "mamba/mamba_ssm/modules/mamba-gqa-sink.py"
+                spec = importlib.util.spec_from_file_location(module_name, source)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                sys.modules[module_name] = module
+            gqa_class = sys.modules[module_name].Mamba2
+            sink_kwargs = dict(use_attn_sink=True, sink_init=config.mamba_sink_init)
+        if gqa_class is None:
             raise ImportError(
                 "Mamba2GQA is unavailable. Ensure mamba_ssm.modules.mamba2_GQA is importable."
             ) from MAMBA_IMPORT_ERROR
         headdim = config.mamba_headdim or (config.n_embd // config.n_head)
-        self.mamba = Mamba2GQA(
+        self.mamba = gqa_class(
             d_model=config.n_embd,
             d_state=config.mamba_d_state,
             d_conv=config.mamba_d_conv,
             window_size=config.mamba_window_size,
             use_flash_swa=True,
+            **sink_kwargs,
             rope_theta=config.mamba_rope_theta,
             dropout_p=config.dropout,
             expand=config.mamba_expand,
@@ -905,6 +925,10 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None, **kwargs):
+        # Blocks currently do not forward attention metadata. Fail here as well
+        # as in the sink implementation so packed inputs cannot bypass its check.
+        if self.config.attention == "mamba2_GQA" and self.config.mamba_use_attn_sink and any(kwargs.get(k) is not None for k in ("seq_idx", "cu_seqlens")):
+            raise NotImplementedError("Mamba2 GQA requires one sequence per batch row; packed sequence boundaries are unsupported")
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, (
